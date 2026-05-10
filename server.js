@@ -18,6 +18,7 @@ const MAX_JSON_BYTES = 25 * 1024 * 1024;
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SESSION_SECRET = process.env.SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY || "rukhsar-local-dev-secret";
 const DISABLE_SUPABASE = process.env.DISABLE_SUPABASE === "1";
 const supabaseConfigErrors = [];
 const supabase = createSupabaseClient("anon", SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -494,6 +495,37 @@ function publicSupabaseUser(authUser, role = "customer") {
   };
 }
 
+function base64UrlEncode(value) {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function base64UrlDecode(value) {
+  return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+}
+
+function signPayload(payload) {
+  return crypto.createHmac("sha256", SESSION_SECRET).update(payload).digest("base64url");
+}
+
+function createSessionToken(user) {
+  const payload = base64UrlEncode({
+    userId: user.id,
+    role: user.role,
+    exp: Date.now() + SESSION_TTL_MS
+  });
+  return `rf_${payload}.${signPayload(payload)}`;
+}
+
+function verifySessionToken(token, db) {
+  if (!token?.startsWith("rf_")) return null;
+  const [payloadPart, signature] = token.slice(3).split(".");
+  if (!payloadPart || !signature || signature !== signPayload(payloadPart)) return null;
+  const payload = base64UrlDecode(payloadPart);
+  if (!payload.exp || payload.exp < Date.now()) return null;
+  const user = db.users.find(item => item.id === payload.userId);
+  return user || null;
+}
+
 function clean(value) {
   return String(value || "").trim();
 }
@@ -908,6 +940,8 @@ async function getAuth(req, db) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
   if (!token) return null;
+  const signedUser = verifySessionToken(token, db);
+  if (signedUser) return signedUser;
   const now = Date.now();
   db.sessions = db.sessions.filter(session => new Date(session.expiresAt).getTime() > now);
   const session = db.sessions.find(item => item.token === token);
@@ -1028,7 +1062,7 @@ async function handleApi(req, res, url) {
       }
       const user = createUserRecord(body);
       db.users.push(user);
-      const token = uid("tok");
+      const token = createSessionToken(user);
       db.sessions.push({ token, userId: user.id, expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString() });
       writeDb(db);
       return sendJson(res, 201, { token, user: publicUser(user) });
@@ -1052,7 +1086,7 @@ async function handleApi(req, res, url) {
         writeDb(db);
         return sendError(res, 401, "Invalid email or password.");
       }
-      const token = uid("tok");
+      const token = createSessionToken(user);
       db.sessions.push({ token, userId: user.id, expiresAt: new Date(Date.now() + SESSION_TTL_MS).toISOString() });
       logLogin(db, user.email, "success", req);
       writeDb(db);
