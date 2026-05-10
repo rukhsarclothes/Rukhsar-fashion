@@ -1348,10 +1348,19 @@ const server = http.createServer((req, res) => {
   return serveStatic(req, res, url);
 });
 
+function appHandler(req, res) {
+  const host = req.headers.host || "localhost";
+  const url = new URL(req.url || "/", `https://${host}`);
+  if (url.pathname.startsWith("/api/")) {
+    return handleApi(req, res, url);
+  }
+  return serveStatic(req, res, url);
+}
+
 if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`Rukhsar Fashion running at http://localhost:${PORT}`);
   });
 }
 
-module.exports = { server, DB_FILE, readDb, writeDb };
+module.exports = { server, appHandler, handleApi, serveStatic, DB_FILE, readDb, writeDb };
