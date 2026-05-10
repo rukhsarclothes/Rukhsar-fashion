@@ -483,6 +483,17 @@ function publicUser(user) {
   };
 }
 
+function publicSupabaseUser(authUser, role = "customer") {
+  const name = authUser.user_metadata?.full_name || authUser.user_metadata?.name || authUser.email?.split("@")[0] || "Customer";
+  return {
+    id: authUser.id,
+    fullName: name,
+    email: authUser.email,
+    role,
+    createdAt: authUser.created_at
+  };
+}
+
 function clean(value) {
   return String(value || "").trim();
 }
@@ -751,6 +762,79 @@ async function supabaseSaveSettingsSection(section, values) {
   if (error) throw new Error(`Supabase settings update failed: ${error.message}`);
 }
 
+async function supabaseRoleForUser(authUser) {
+  const client = supabaseWriteClient();
+  if (!client || !authUser?.id) return "customer";
+  const [roleResult, adminResult] = await Promise.all([
+    client.from("user_roles").select("role").eq("user_id", authUser.id).maybeSingle(),
+    client.from("admin_users").select("role,email").eq("user_id", authUser.id).maybeSingle()
+  ]);
+  if (roleResult.error && roleResult.error.code !== "42P01") {
+    console.warn("Supabase user_roles lookup failed:", roleResult.error.message);
+  }
+  if (adminResult.error && adminResult.error.code !== "42P01") {
+    console.warn("Supabase admin_users lookup failed:", adminResult.error.message);
+  }
+  const role = roleResult.data?.role || adminResult.data?.role || "customer";
+  return role === "admin" ? "admin" : "customer";
+}
+
+async function supabaseEnsureProfile(authUser, role = "customer") {
+  const client = supabaseWriteClient();
+  if (!client || !authUser?.id) return;
+  const fullName = authUser.user_metadata?.full_name || authUser.user_metadata?.name || authUser.email?.split("@")[0] || "Customer";
+  const profileResult = await client.from("profiles").upsert({
+    id: authUser.id,
+    full_name: fullName,
+    email: authUser.email,
+    updated_at: new Date().toISOString()
+  }, { onConflict: "id" });
+  if (profileResult.error && profileResult.error.code !== "42P01") {
+    console.warn("Supabase profile upsert failed:", profileResult.error.message);
+  }
+  const roleResult = await client.from("user_roles").upsert({
+    user_id: authUser.id,
+    role,
+    updated_at: new Date().toISOString()
+  }, { onConflict: "user_id" });
+  if (roleResult.error && roleResult.error.code !== "42P01") {
+    console.warn("Supabase role upsert failed:", roleResult.error.message);
+  }
+}
+
+async function supabaseSessionFromToken(accessToken, requiredRole = "") {
+  if (!supabase || !accessToken) return null;
+  const { data, error } = await supabase.auth.getUser(accessToken);
+  if (error || !data?.user) {
+    throw new Error(error?.message || "Supabase session could not be verified.");
+  }
+  const role = await supabaseRoleForUser(data.user);
+  await supabaseEnsureProfile(data.user, role);
+  if (requiredRole === "admin" && role !== "admin") {
+    const err = new Error("This Google account is not authorized for admin access.");
+    err.statusCode = 403;
+    throw err;
+  }
+  return { token: accessToken, user: publicSupabaseUser(data.user, role), provider: "supabase" };
+}
+
+async function supabasePasswordAuth(email, password, mode = "login") {
+  if (!supabase) throw new Error("Supabase Auth is not configured.");
+  const authCall = mode === "signup"
+    ? supabase.auth.signUp({ email, password })
+    : supabase.auth.signInWithPassword({ email, password });
+  const { data, error } = await authCall;
+  if (error) throw new Error(error.message);
+  if (!data.session?.access_token) {
+    const err = new Error("Please confirm your email, then login again.");
+    err.statusCode = 202;
+    throw err;
+  }
+  const role = await supabaseRoleForUser(data.user);
+  await supabaseEnsureProfile(data.user, role);
+  return { token: data.session.access_token, user: publicSupabaseUser(data.user, role), provider: "supabase" };
+}
+
 function normalizeProduct(product) {
   let changed = false;
   if (!Array.isArray(product.images)) {
@@ -820,18 +904,28 @@ function productPayload(body, existing = {}) {
   return { product, errors };
 }
 
-function getAuth(req, db) {
+async function getAuth(req, db) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!token) return null;
   const now = Date.now();
   db.sessions = db.sessions.filter(session => new Date(session.expiresAt).getTime() > now);
   const session = db.sessions.find(item => item.token === token);
   const user = session ? db.users.find(item => item.id === session.userId) : null;
-  return user || null;
+  if (user) return user;
+  if (supabaseEnabled()) {
+    try {
+      const verified = await supabaseSessionFromToken(token);
+      return verified.user;
+    } catch (error) {
+      console.warn("Supabase token verification failed:", error.message);
+    }
+  }
+  return null;
 }
 
-function requireAuth(req, res, db) {
-  const user = getAuth(req, db);
+async function requireAuth(req, res, db) {
+  const user = await getAuth(req, db);
   if (!user) {
     sendError(res, 401, "Please login to continue.");
     return null;
@@ -839,8 +933,8 @@ function requireAuth(req, res, db) {
   return user;
 }
 
-function requireAdmin(req, res, db) {
-  const user = requireAuth(req, res, db);
+async function requireAdmin(req, res, db) {
+  const user = await requireAuth(req, res, db);
   if (!user) return null;
   if (user.role !== "admin") {
     sendError(res, 403, "Admin access required.");
@@ -871,6 +965,16 @@ async function handleApi(req, res, url) {
         return sendJson(res, 200, { settings: sanitizeSettings(settings) });
       }
       return sendJson(res, 200, { settings: sanitizeSettings(db.settings) });
+    }
+
+    if (method === "GET" && pathname === "/api/auth/config") {
+      const vercelUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : "";
+      return sendJson(res, 200, {
+        supabaseUrl: SUPABASE_URL,
+        supabaseAnonKey: SUPABASE_ANON_KEY,
+        googleEnabled: supabaseEnabled(),
+        redirectBase: process.env.PUBLIC_SITE_URL || vercelUrl
+      });
     }
 
     if (method === "GET" && pathname === "/api/products") {
@@ -913,6 +1017,15 @@ async function handleApi(req, res, url) {
       if (clean(body.password).length < 6) errors.push("Password must be at least 6 characters.");
       if (db.users.some(user => user.email === clean(body.email).toLowerCase())) errors.push("Email is already registered.");
       if (errors.length) return sendJson(res, 400, { errors });
+      if (supabaseEnabled()) {
+        try {
+          const session = await supabasePasswordAuth(clean(body.email).toLowerCase(), clean(body.password), "signup");
+          return sendJson(res, 201, session);
+        } catch (error) {
+          if (error.statusCode === 202) return sendJson(res, 202, { message: error.message });
+          console.warn("Supabase signup failed, using local fallback:", error.message);
+        }
+      }
       const user = createUserRecord(body);
       db.users.push(user);
       const token = uid("tok");
@@ -923,6 +1036,16 @@ async function handleApi(req, res, url) {
 
     if (method === "POST" && pathname === "/api/auth/login") {
       const body = await parseJson(req);
+      if (supabaseEnabled()) {
+        try {
+          const session = await supabasePasswordAuth(clean(body.email).toLowerCase(), clean(body.password), "login");
+          logLogin(db, session.user.email, "success", req);
+          writeDb(db);
+          return sendJson(res, 200, session);
+        } catch (error) {
+          console.warn("Supabase password login failed:", error.message);
+        }
+      }
       const user = db.users.find(item => item.email === clean(body.email).toLowerCase());
       if (!user || !verifyPassword(clean(body.password), user.passwordHash)) {
         logLogin(db, body.email, "failed", req);
@@ -936,6 +1059,16 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { token, user: publicUser(user) });
     }
 
+    if (method === "POST" && pathname === "/api/auth/supabase") {
+      const body = await parseJson(req);
+      const accessToken = clean(body.accessToken);
+      const requiredRole = clean(body.role);
+      const session = await supabaseSessionFromToken(accessToken, requiredRole);
+      logLogin(db, session.user.email, "success", req);
+      writeDb(db);
+      return sendJson(res, 200, session);
+    }
+
     if (method === "POST" && pathname === "/api/auth/logout") {
       const header = req.headers.authorization || "";
       const token = header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -945,14 +1078,14 @@ async function handleApi(req, res, url) {
     }
 
     if (method === "GET" && pathname === "/api/me") {
-      const user = requireAuth(req, res, db);
+      const user = await requireAuth(req, res, db);
       if (!user) return;
       writeDb(db);
       return sendJson(res, 200, { user: publicUser(user) });
     }
 
     if (method === "GET" && pathname === "/api/orders") {
-      const user = requireAuth(req, res, db);
+      const user = await requireAuth(req, res, db);
       if (!user) return;
       writeDb(db);
       const orders = user.role === "admin" ? db.orders : db.orders.filter(order => order.userId === user.id);
@@ -960,7 +1093,7 @@ async function handleApi(req, res, url) {
     }
 
     if (method === "POST" && pathname === "/api/orders") {
-      const user = requireAuth(req, res, db);
+      const user = await requireAuth(req, res, db);
       if (!user) return;
       const body = await parseJson(req);
       const errors = [];
@@ -1086,7 +1219,7 @@ async function handleApi(req, res, url) {
     }
 
     if (method === "POST" && pathname === "/api/payments/razorpay/order") {
-      const user = requireAuth(req, res, db);
+      const user = await requireAuth(req, res, db);
       if (!user) return;
       const body = await parseJson(req);
       const amount = Number(body.amount);
@@ -1108,7 +1241,7 @@ async function handleApi(req, res, url) {
     }
 
     if (method === "POST" && pathname === "/api/payments/razorpay/verify") {
-      const user = requireAuth(req, res, db);
+      const user = await requireAuth(req, res, db);
       if (!user) return;
       const body = await parseJson(req);
       const payload = `${clean(body.razorpay_order_id)}|${clean(body.razorpay_payment_id)}`;
@@ -1125,7 +1258,7 @@ async function handleApi(req, res, url) {
     }
 
     if (pathname.startsWith("/api/admin")) {
-      const admin = requireAdmin(req, res, db);
+      const admin = await requireAdmin(req, res, db);
       if (!admin) return;
 
       if (method === "GET" && pathname === "/api/admin/summary") {

@@ -3,6 +3,22 @@
 
 create extension if not exists pgcrypto;
 
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  full_name text,
+  email text unique,
+  phone text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.user_roles (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  role text not null default 'customer' check (role in ('customer', 'admin')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.products (
   id text primary key default ('prod_' || replace(gen_random_uuid()::text, '-', '')),
   name text not null,
@@ -76,6 +92,37 @@ create table if not exists public.admin_users (
   created_at timestamptz not null default now()
 );
 
+create or replace function public.handle_new_auth_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.profiles (id, full_name, email)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data ->> 'full_name', new.raw_user_meta_data ->> 'name', split_part(new.email, '@', 1)),
+    new.email
+  )
+  on conflict (id) do update set
+    full_name = excluded.full_name,
+    email = excluded.email,
+    updated_at = now();
+
+  insert into public.user_roles (user_id, role)
+  values (new.id, 'customer')
+  on conflict (user_id) do nothing;
+
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+after insert on auth.users
+for each row execute function public.handle_new_auth_user();
+
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
@@ -97,11 +144,39 @@ before update on public.orders
 for each row execute function public.set_updated_at();
 
 alter table public.products enable row level security;
+alter table public.profiles enable row level security;
+alter table public.user_roles enable row level security;
 alter table public.orders enable row level security;
 alter table public.order_items enable row level security;
 alter table public.seller_applications enable row level security;
 alter table public.store_settings enable row level security;
 alter table public.admin_users enable row level security;
+
+drop policy if exists "Users can read own profile" on public.profiles;
+create policy "Users can read own profile"
+on public.profiles for select
+to authenticated
+using (id = auth.uid() or exists (select 1 from public.admin_users where user_id = auth.uid()));
+
+drop policy if exists "Users can update own profile" on public.profiles;
+create policy "Users can update own profile"
+on public.profiles for update
+to authenticated
+using (id = auth.uid())
+with check (id = auth.uid());
+
+drop policy if exists "Users can read own role" on public.user_roles;
+create policy "Users can read own role"
+on public.user_roles for select
+to authenticated
+using (user_id = auth.uid() or exists (select 1 from public.admin_users where user_id = auth.uid()));
+
+drop policy if exists "Admins can manage user roles" on public.user_roles;
+create policy "Admins can manage user roles"
+on public.user_roles for all
+to authenticated
+using (exists (select 1 from public.admin_users where user_id = auth.uid()))
+with check (exists (select 1 from public.admin_users where user_id = auth.uid()));
 
 drop policy if exists "Public can read active products" on public.products;
 create policy "Public can read active products"
@@ -172,6 +247,9 @@ grant select, insert, update, delete on public.order_items to authenticated;
 grant select, insert, update, delete on public.seller_applications to authenticated;
 grant select, insert, update, delete on public.store_settings to authenticated;
 grant select on public.admin_users to authenticated;
+grant select, update on public.profiles to authenticated;
+grant select on public.user_roles to authenticated;
+grant select, insert, update, delete on public.user_roles to authenticated;
 grant usage, select on all sequences in schema public to anon, authenticated;
 
 insert into storage.buckets (id, name, public)

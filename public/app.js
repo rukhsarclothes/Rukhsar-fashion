@@ -11,7 +11,8 @@ const state = {
   editingProduct: null,
   deleteProductId: null,
   settings: null,
-  settingsTab: "general"
+  settingsTab: "general",
+  authConfig: null
 };
 
 const categoryLabels = {
@@ -164,6 +165,7 @@ function clearSession() {
   state.user = null;
   localStorage.removeItem("rf_token");
   localStorage.removeItem("rf_user");
+  sessionStorage.removeItem("rf_oauth_role");
 }
 
 function saveCart() {
@@ -214,6 +216,55 @@ async function api(path, options = {}) {
     throw new Error(message);
   }
   return payload;
+}
+
+async function loadAuthConfig() {
+  if (!state.authConfig) state.authConfig = await api("/api/auth/config");
+  return state.authConfig;
+}
+
+async function startGoogleLogin(role = "customer") {
+  const config = await loadAuthConfig();
+  if (!config.googleEnabled || !config.supabaseUrl || !config.supabaseAnonKey) {
+    throw new Error("Google login is not configured yet.");
+  }
+  sessionStorage.setItem("rf_oauth_role", role);
+  const redirectTo = `${window.location.origin}/auth/callback?role=${encodeURIComponent(role)}`;
+  const params = new URLSearchParams({
+    provider: "google",
+    redirect_to: redirectTo
+  });
+  window.location.href = `${config.supabaseUrl}/auth/v1/authorize?${params.toString()}`;
+}
+
+async function processAuthCallback() {
+  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const hasAuthHash = hash.has("access_token") || hash.has("error") || location.pathname === "/auth/callback";
+  if (!hasAuthHash) return false;
+  const role = new URLSearchParams(location.search).get("role") || sessionStorage.getItem("rf_oauth_role") || "customer";
+  if (hash.has("error")) {
+    const message = hash.get("error_description") || hash.get("error") || "Google login failed.";
+    history.replaceState({}, "", role === "admin" ? "/admin" : "#/login");
+    shell(`<div><div class="eyebrow">Login</div><h2>Authentication failed</h2></div>`, `<div class="message error">${decodeURIComponent(message)}</div>`);
+    return true;
+  }
+  const accessToken = hash.get("access_token");
+  if (!accessToken) return false;
+  try {
+    const session = await api("/api/auth/supabase", {
+      method: "POST",
+      body: JSON.stringify({ accessToken, role: role === "admin" ? "admin" : "" })
+    });
+    saveSession(session);
+    sessionStorage.removeItem("rf_oauth_role");
+    history.replaceState({}, "", role === "admin" ? "/admin/dashboard" : "#/");
+    await route();
+  } catch (error) {
+    clearSession();
+    history.replaceState({}, "", role === "admin" ? "/admin" : "#/login");
+    shell(`<div><div class="eyebrow">Login</div><h2>Authentication failed</h2></div>`, `<div class="message error">${error.message}</div>`);
+  }
+  return true;
 }
 
 async function loadProducts(params = "") {
@@ -475,6 +526,7 @@ function renderLogin(mode = "login") {
       <div class="field"><label>Email</label><input type="email" name="email" required></div>
       <div class="field"><label>Password</label><input type="password" name="password" required minlength="6"></div>
       <button class="btn" type="submit">${isSignup ? "Create Account" : "Login"}</button>
+      <button class="btn ghost" type="button" data-action="oauth-login" data-role="customer">Continue with Google</button>
       <a href="#/${isSignup ? "login" : "signup"}">${isSignup ? "Already have an account?" : "New here? Create an account"}</a>
     </form>
   `);
@@ -526,6 +578,7 @@ function renderAdminLogin() {
         <div class="field"><label>Email</label><input type="email" name="email" value="admin@rukhsarfashion.com" required></div>
         <div class="field"><label>Password</label><input type="password" name="password" required></div>
         <button class="btn" type="submit">Login to Dashboard</button>
+        <button class="btn ghost" type="button" data-action="oauth-login" data-role="admin">Continue with Google as Admin</button>
       </form>
     </section>
   `;
@@ -927,6 +980,20 @@ function userTable(users) {
 }
 
 const handlers = {
+  "oauth-login": async (event, button) => {
+    button.disabled = true;
+    const original = button.textContent;
+    button.textContent = "Connecting...";
+    try {
+      await startGoogleLogin(button.dataset.role || "customer");
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = original;
+      const form = button.closest("form");
+      if (form) showFormMessage(form, error.message, "error");
+      else toast(error.message);
+    }
+  },
   qty: (event, button) => {
     const item = state.cart.find(cartItem => cartItem.key === button.dataset.id);
     if (!item) return;
@@ -1215,14 +1282,29 @@ const formHandlers = {
     toast("Added to cart.");
   },
   login: async form => {
+    setButtonLoading(form, true, "Logging in...");
     const payload = Object.fromEntries(new FormData(form));
-    saveSession(await api("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }));
-    location.hash = "#/";
+    try {
+      saveSession(await api("/api/auth/login", { method: "POST", body: JSON.stringify(payload) }));
+      location.hash = "#/";
+    } finally {
+      setButtonLoading(form, false);
+    }
   },
   signup: async form => {
+    setButtonLoading(form, true, "Creating...");
     const payload = Object.fromEntries(new FormData(form));
-    saveSession(await api("/api/auth/signup", { method: "POST", body: JSON.stringify(payload) }));
-    location.hash = "#/";
+    try {
+      const session = await api("/api/auth/signup", { method: "POST", body: JSON.stringify(payload) });
+      if (session.token) {
+        saveSession(session);
+        location.hash = "#/";
+      } else {
+        showFormMessage(form, session.message || "Please check your email to confirm your account.", "success");
+      }
+    } finally {
+      setButtonLoading(form, false);
+    }
   },
   "admin-login": async form => {
     setButtonLoading(form, true, "Logging in...");
@@ -1232,6 +1314,10 @@ const formHandlers = {
       if (session.user.role !== "admin") throw new Error("Admin access required.");
       saveSession(session);
       navigate("/admin/dashboard");
+    } catch (error) {
+      console.error("Admin login failed:", error);
+      showFormMessage(form, error.message, "error");
+      throw error;
     } finally {
       setButtonLoading(form, false);
     }
@@ -1310,6 +1396,7 @@ const formHandlers = {
 };
 
 async function route() {
+  if (await processAuthCallback()) return;
   mobileNav.classList.remove("open");
   saveCart();
   document.body.classList.toggle("admin-mode", location.pathname.startsWith("/admin"));

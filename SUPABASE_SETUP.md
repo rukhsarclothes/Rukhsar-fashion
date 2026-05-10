@@ -14,13 +14,15 @@ VITE_SUPABASE_URL=https://waujhojqvabhyqykgeft.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key
 ```
 
-`SUPABASE_SERVICE_ROLE_KEY` is optional, but secure admin writes need either this server-only key or a future Supabase Auth admin session. Never expose the service role key in frontend code.
+`SUPABASE_SERVICE_ROLE_KEY` is required for server-side admin writes and server-side role verification. Never expose the service role key in frontend code or as a `VITE_*` variable.
 
 ## SQL Schema
 
 Run [supabase/schema.sql](supabase/schema.sql) in the Supabase SQL Editor.
 
 It creates:
+- `profiles`
+- `user_roles`
 - `products`
 - `orders`
 - `order_items`
@@ -34,6 +36,53 @@ It also creates the storage buckets:
 
 If you already ran an older copy of the schema and see permission/RLS errors for seller applications or admin reads, run [supabase/grants-and-admin.sql](supabase/grants-and-admin.sql) once in the SQL Editor.
 
+If you already ran the schema before Supabase Auth support was added, run [supabase/auth-profiles.sql](supabase/auth-profiles.sql) once in the SQL Editor.
+
+## Supabase Auth and Google Login
+
+Enable email/password auth:
+1. Supabase Dashboard > Authentication > Providers.
+2. Enable Email.
+3. Decide whether email confirmation is required for your store.
+
+Enable Google OAuth:
+1. Supabase Dashboard > Authentication > Providers > Google.
+2. Add your Google OAuth Client ID and Client Secret.
+3. In Google Cloud Console, add the Supabase callback URL shown in the Google provider settings.
+
+Configure Supabase redirect URLs:
+- Site URL: `https://rukhsar-fashion.vercel.app`
+- Redirect URLs:
+  - `http://localhost:3000/**`
+  - `https://rukhsar-fashion.vercel.app/**`
+  - any Vercel preview wildcard you use, for example `https://*-rukhsarclothes*.vercel.app/**`
+
+The app uses these callback URLs:
+- Local user/admin Google callback: `http://localhost:3000/auth/callback?role=customer`
+- Local admin Google callback: `http://localhost:3000/auth/callback?role=admin`
+- Production user/admin Google callback: `https://rukhsar-fashion.vercel.app/auth/callback?role=customer`
+- Production admin Google callback: `https://rukhsar-fashion.vercel.app/auth/callback?role=admin`
+
+## Add an Admin User
+
+Admin access is server-verified from Supabase. After the admin signs in once with Google or email/password, run this SQL with their email:
+
+```sql
+insert into public.admin_users (user_id, email, role)
+select id, email, 'admin'
+from auth.users
+where email = 'admin@example.com'
+on conflict (user_id) do update set role = excluded.role, email = excluded.email;
+
+insert into public.user_roles (user_id, role)
+select id, 'admin'
+from auth.users
+where email = 'admin@example.com'
+on conflict (user_id) do update set role = excluded.role, updated_at = now();
+```
+
+If a Google account is not listed as admin, `/admin/dashboard` will reject it with: `This Google account is not authorized for admin access.`
+
 ## RLS Policies
 
 The SQL enables Row Level Security on all public tables.
@@ -42,17 +91,10 @@ Current policy model:
 - Public users can read only active products.
 - Public users can insert seller applications.
 - Public users can read store settings.
-- Admin table/order/settings writes require a Supabase Auth user listed in `admin_users`.
-
-Temporary local admin limitation:
-The current app still uses its local JSON-based admin login for the admin UI. For secure Supabase admin writes from this Node server, add `SUPABASE_SERVICE_ROLE_KEY` to the server environment. The key must stay server-only and must never be exposed as `VITE_*` or in frontend code.
-
-Alternative production path:
-1. Create an admin user with Supabase Auth.
-2. Insert that auth user's UUID into `public.admin_users`.
-3. Migrate the admin login to Supabase Auth so requests carry that authenticated JWT.
-
-Without one of those two admin paths, Supabase will allow public reads but will reject product/order/settings writes by design.
+- Users can read/update their own profile.
+- Users can read their own role.
+- Admin access requires `admin_users` / `user_roles` role data.
+- Server-side admin APIs verify the Supabase session or local fallback session and require admin role.
 
 ## Seed Sample Products
 
