@@ -42,7 +42,19 @@
       "destination": "/api/index.js"
     },
     {
-      "source": "/((?!api/).*)",
+      "source": "/",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/admin",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/admin/:path*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/collections/:path*",
       "destination": "/index.html"
     }
   ]

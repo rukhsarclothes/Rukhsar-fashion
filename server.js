@@ -19,12 +19,23 @@ const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL |
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 const DISABLE_SUPABASE = process.env.DISABLE_SUPABASE === "1";
-const supabase = !DISABLE_SUPABASE && SUPABASE_URL && SUPABASE_ANON_KEY
-  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } })
-  : null;
-const supabaseAdmin = !DISABLE_SUPABASE && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
-  : supabase;
+const supabaseConfigErrors = [];
+const supabase = createSupabaseClient("anon", SUPABASE_URL, SUPABASE_ANON_KEY);
+const supabaseAdmin = createSupabaseClient("service", SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) || supabase;
+
+function createSupabaseClient(label, url, key) {
+  if (DISABLE_SUPABASE) return null;
+  if (!url || !key) {
+    supabaseConfigErrors.push(`Supabase ${label} client is missing ${!url ? "URL" : "key"}.`);
+    return null;
+  }
+  try {
+    return createClient(url, key, { auth: { persistSession: false } });
+  } catch (error) {
+    supabaseConfigErrors.push(`Supabase ${label} client failed to initialize: ${error.message}`);
+    return null;
+  }
+}
 
 function loadEnvFile(fileName) {
   const envPath = path.join(__dirname, fileName);
@@ -545,7 +556,7 @@ function supabaseWriteClient() {
 }
 
 function requireSupabaseAdminWrite() {
-  if (!SUPABASE_SERVICE_ROLE_KEY) {
+  if (!SUPABASE_SERVICE_ROLE_KEY || !supabaseAdmin) {
     throw new Error("Supabase admin writes need SUPABASE_SERVICE_ROLE_KEY in the server environment, or migrate admin login to Supabase Auth and add the admin user to public.admin_users.");
   }
 }
@@ -848,7 +859,8 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, {
         ok: true,
         supabaseConfigured: supabaseEnabled(),
-        supabaseServiceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY),
+        supabaseServiceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY && supabaseAdmin),
+        supabaseConfigErrors,
         runtime: process.env.VERCEL ? "vercel" : "node"
       });
     }
