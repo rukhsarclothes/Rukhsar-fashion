@@ -1,5 +1,6 @@
 const assert = require("assert");
 const fs = require("fs");
+process.env.DISABLE_SUPABASE = "1";
 const { server } = require("../server");
 const { DB_FILE } = require("../server");
 
@@ -238,8 +239,12 @@ async function run() {
     })
   });
   const noMediaPayload = await noMediaProduct.json();
-  assert.equal(noMediaProduct.status, 400, "product without thumbnail should fail with API validation");
-  assert.ok(noMediaPayload.errors.includes("Main thumbnail image is required."), "missing thumbnail should return readable error");
+  assert.equal(noMediaProduct.status, 201, "product without thumbnail should save and use frontend fallback media");
+  assert.ok(noMediaPayload.product.id, "product without thumbnail should return the saved product");
+  await request(`/api/admin/products/${noMediaPayload.product.id}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${admin.token}` }
+  });
 
   const uploadedOnlyProduct = await request("/api/admin/products", {
     method: "POST",

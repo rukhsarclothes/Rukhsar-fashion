@@ -32,6 +32,7 @@ const cartCount = document.querySelector("#cartCount");
 const toastEl = document.querySelector("#toast");
 const mobileNav = document.querySelector("#mobileNav");
 const FALLBACK_IMAGE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='900' height='1200' viewBox='0 0 900 1200'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1' y1='0' y2='1'%3E%3Cstop stop-color='%2315091d'/%3E%3Cstop offset='1' stop-color='%2324102f'/%3E%3C/linearGradient%3E%3Cpattern id='p' width='90' height='90' patternUnits='userSpaceOnUse'%3E%3Cpath d='M45 0 90 45 45 90 0 45Z' fill='none' stroke='%23d7b56d' stroke-opacity='.28' stroke-width='2'/%3E%3C/pattern%3E%3C/defs%3E%3Crect width='900' height='1200' fill='url(%23g)'/%3E%3Crect width='900' height='1200' fill='url(%23p)' opacity='.5'/%3E%3Crect x='70' y='70' width='760' height='1060' rx='36' fill='none' stroke='%23d7b56d' stroke-opacity='.55' stroke-width='3'/%3E%3Ctext x='450' y='590' text-anchor='middle' fill='%23f2d993' font-family='Georgia,serif' font-size='54'%3ERukhsar%3C/text%3E%3Ctext x='450' y='655' text-anchor='middle' fill='%23fff6df' fill-opacity='.76' font-family='Arial,sans-serif' font-size='28'%3EFashion%3C/text%3E%3C/svg%3E";
+window.RF_FALLBACK_IMAGE = FALLBACK_IMAGE;
 
 document.querySelector("#menuButton").addEventListener("click", () => {
   mobileNav.classList.toggle("open");
@@ -131,7 +132,7 @@ function firstMedia(items) {
 function imageTag(src, alt, className = "", attrs = "") {
   const safeSrc = cleanMedia(src) || FALLBACK_IMAGE;
   const classAttr = className ? ` class="${className}"` : "";
-  return `<img${classAttr} src="${safeSrc}" alt="${alt}" ${attrs} onerror="this.onerror=null;this.src='${FALLBACK_IMAGE}'">`;
+  return `<img${classAttr} src="${safeSrc}" alt="${alt}" ${attrs} onerror="this.onerror=null;this.src=window.RF_FALLBACK_IMAGE">`;
 }
 
 function isActiveProduct(product) {
@@ -1146,9 +1147,6 @@ async function productFormPayload(form) {
   const thumbnail = formData.get("thumbnail");
   const galleryImages = linesToList(formData.get("galleryImages"));
   const sizes = formData.getAll("sizes");
-  if (!thumbnail) {
-    throw new Error("Upload a thumbnail image or add an external thumbnail URL before saving.");
-  }
   return {
     id: formData.get("id"),
     name: formData.get("name"),

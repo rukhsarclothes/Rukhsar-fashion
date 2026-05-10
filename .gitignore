@@ -2,3 +2,6 @@ data/db.json
 server.out.log
 server.err.log
 *.log
+.env
+.env.local
+node_modules/

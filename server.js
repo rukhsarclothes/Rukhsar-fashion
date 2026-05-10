@@ -2,6 +2,10 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { createClient } = require("@supabase/supabase-js");
+
+loadEnvFile(".env.local");
+loadEnvFile(".env");
 
 const PORT = process.env.PORT || 3000;
 const DATA_DIR = path.join(__dirname, "data");
@@ -10,6 +14,30 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const SECRET_FIELDS = new Set(["razorpayKeySecret", "razorpayWebhookSecret", "shiprocketPassword", "shiprocketToken"]);
 const MAX_JSON_BYTES = 25 * 1024 * 1024;
+const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || "";
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const DISABLE_SUPABASE = process.env.DISABLE_SUPABASE === "1";
+const supabase = !DISABLE_SUPABASE && SUPABASE_URL && SUPABASE_ANON_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { persistSession: false } })
+  : null;
+const supabaseAdmin = !DISABLE_SUPABASE && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } })
+  : supabase;
+
+function loadEnvFile(fileName) {
+  const envPath = path.join(__dirname, fileName);
+  if (!fs.existsSync(envPath)) return;
+  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+    const index = trimmed.indexOf("=");
+    const key = trimmed.slice(0, index).trim();
+    const value = trimmed.slice(index + 1).trim().replace(/^["']|["']$/g, "");
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -503,6 +531,214 @@ function listFromValue(value) {
   return clean(value).split(",").map(clean).filter(Boolean);
 }
 
+function slugify(value) {
+  return clean(value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || uid("product");
+}
+
+function supabaseEnabled() {
+  return Boolean(supabase);
+}
+
+function supabaseWriteClient() {
+  return supabaseAdmin;
+}
+
+function requireSupabaseAdminWrite() {
+  if (!SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error("Supabase admin writes need SUPABASE_SERVICE_ROLE_KEY in the server environment, or migrate admin login to Supabase Auth and add the admin user to public.admin_users.");
+  }
+}
+
+function toAppProduct(row) {
+  const product = {
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    category: row.category,
+    price: Number(row.price || 0),
+    discountPrice: Number(row.discount_price || 0),
+    discount: 0,
+    stock: Number(row.stock || 0),
+    sizes: Array.isArray(row.sizes) ? row.sizes : [],
+    colors: Array.isArray(row.colors) ? row.colors : [],
+    thumbnail: row.thumbnail_url || "",
+    galleryImages: Array.isArray(row.gallery_urls) ? row.gallery_urls : [],
+    images: [row.thumbnail_url, ...(Array.isArray(row.gallery_urls) ? row.gallery_urls : [])].filter(Boolean),
+    videoUrl: row.video_url || "",
+    description: row.description || "",
+    featured: Boolean(row.featured),
+    status: row.active === false ? "inactive" : "active",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+  product.discount = product.discountPrice > 0 && product.price > 0 ? Math.max(0, Math.round((1 - product.discountPrice / product.price) * 100)) : 0;
+  normalizeProduct(product);
+  return product;
+}
+
+function toSupabaseProduct(product) {
+  return {
+    id: product.id,
+    name: product.name,
+    slug: product.slug || slugify(product.name),
+    description: product.description,
+    category: product.category,
+    price: product.price,
+    discount_price: product.discountPrice || 0,
+    stock: product.stock,
+    sizes: product.sizes,
+    colors: product.colors,
+    thumbnail_url: product.thumbnail,
+    gallery_urls: product.galleryImages,
+    video_url: product.videoUrl,
+    featured: product.featured,
+    active: product.status !== "inactive",
+    updated_at: new Date().toISOString()
+  };
+}
+
+async function supabaseProducts({ q = "", category = "", includeInactive = false } = {}) {
+  const client = includeInactive ? supabaseWriteClient() : supabase;
+  if (!client) throw new Error("Supabase is not configured.");
+  let query = client.from("products").select("*").order("created_at", { ascending: false });
+  if (!includeInactive) query = query.eq("active", true);
+  if (category) query = query.eq("category", category);
+  if (q) query = query.or(`name.ilike.%${q}%,category.ilike.%${q}%,description.ilike.%${q}%`);
+  const { data, error } = await query;
+  if (error) throw new Error(`Supabase products read failed: ${error.message}`);
+  const products = (data || []).map(toAppProduct);
+  return { products, categories: [...new Set(products.map(item => item.category))] };
+}
+
+async function supabaseProductById(id, includeInactive = false) {
+  const client = includeInactive ? supabaseWriteClient() : supabase;
+  if (!client) throw new Error("Supabase is not configured.");
+  let query = client.from("products").select("*").eq("id", id);
+  if (!includeInactive) query = query.eq("active", true);
+  const { data, error } = await query.maybeSingle();
+  if (error) throw new Error(`Supabase product read failed: ${error.message}`);
+  return data ? toAppProduct(data) : null;
+}
+
+async function supabaseCreateProduct(product) {
+  requireSupabaseAdminWrite();
+  const client = supabaseWriteClient();
+  if (!client) throw new Error("Supabase is not configured.");
+  const payload = toSupabaseProduct(product);
+  const { data, error } = await client.from("products").insert(payload).select("*").single();
+  if (error) throw new Error(`Supabase product insert failed: ${error.message}`);
+  return toAppProduct(data);
+}
+
+async function supabaseUpdateProduct(id, product) {
+  requireSupabaseAdminWrite();
+  const client = supabaseWriteClient();
+  if (!client) throw new Error("Supabase is not configured.");
+  const payload = toSupabaseProduct({ ...product, id });
+  delete payload.id;
+  const { data, error } = await client.from("products").update(payload).eq("id", id).select("*").single();
+  if (error) throw new Error(`Supabase product update failed: ${error.message}`);
+  return toAppProduct(data);
+}
+
+async function supabaseDeleteProduct(id) {
+  requireSupabaseAdminWrite();
+  const client = supabaseWriteClient();
+  if (!client) throw new Error("Supabase is not configured.");
+  const { data, error } = await client.from("products").delete().eq("id", id).select("*").single();
+  if (error) throw new Error(`Supabase product delete failed: ${error.message}`);
+  return toAppProduct(data);
+}
+
+function toAppSellerApplication(row) {
+  return {
+    id: row.id,
+    fullName: row.full_name,
+    shopName: row.shop_name,
+    phone: row.phone,
+    email: row.email,
+    city: row.city,
+    category: row.product_category,
+    website: row.website,
+    message: row.message,
+    status: row.status || "New",
+    createdAt: row.created_at
+  };
+}
+
+async function supabaseCreateSellerApplication(application) {
+  const client = supabaseWriteClient();
+  if (!client) throw new Error("Supabase is not configured.");
+  const { data, error } = await client.from("seller_applications").insert({
+    id: application.id,
+    full_name: application.fullName,
+    shop_name: application.shopName,
+    phone: application.phone,
+    email: application.email,
+    city: application.city,
+    product_category: application.category,
+    website: application.website,
+    message: application.message,
+    status: application.status
+  }).select("*").single();
+  if (error) throw new Error(`Supabase seller application insert failed: ${error.message}`);
+  return toAppSellerApplication(data);
+}
+
+async function supabaseInsertOrder(order) {
+  requireSupabaseAdminWrite();
+  const client = supabaseWriteClient();
+  if (!client) throw new Error("Supabase is not configured.");
+  const { data, error } = await client.from("orders").insert({
+    id: order.id,
+    user_id: order.userId,
+    customer: order.customer,
+    address: order.address,
+    total: order.total,
+    payment: order.payment,
+    shipment: order.shipment,
+    status: order.status
+  }).select("*").single();
+  if (error) throw new Error(`Supabase order insert failed: ${error.message}`);
+  const rows = order.items.map(item => ({
+    order_id: order.id,
+    product_id: item.productId,
+    product_name: item.name,
+    price: item.price,
+    quantity: item.qty,
+    size: item.size,
+    color: item.color,
+    image_url: item.image
+  }));
+  const itemsResult = await client.from("order_items").insert(rows);
+  if (itemsResult.error) throw new Error(`Supabase order items insert failed: ${itemsResult.error.message}`);
+  return { ...order, createdAt: data.created_at, updatedAt: data.updated_at };
+}
+
+async function supabaseSettings(localSettings) {
+  const { data, error } = await supabase.from("store_settings").select("section, values").order("section");
+  if (error) throw new Error(`Supabase settings read failed: ${error.message}`);
+  const settings = JSON.parse(JSON.stringify(localSettings || defaultSettings()));
+  for (const row of data || []) {
+    if (settings[row.section] && row.values && typeof row.values === "object") {
+      settings[row.section] = mergeSection(settings[row.section], row.values);
+    }
+  }
+  return settings;
+}
+
+async function supabaseSaveSettingsSection(section, values) {
+  requireSupabaseAdminWrite();
+  const client = supabaseWriteClient();
+  if (!client) throw new Error("Supabase is not configured.");
+  const { error } = await client.from("store_settings").upsert({
+    section,
+    values,
+    updated_at: new Date().toISOString()
+  }, { onConflict: "section" });
+  if (error) throw new Error(`Supabase settings update failed: ${error.message}`);
+}
+
 function normalizeProduct(product) {
   let changed = false;
   if (!Array.isArray(product.images)) {
@@ -568,8 +804,6 @@ function productPayload(body, existing = {}) {
   if (!Number.isFinite(product.stock) || product.stock < 0) errors.push("Valid stock is required.");
   if (!product.sizes.length) errors.push("At least one size is required.");
   if (!product.colors.length) errors.push("At least one color is required.");
-  if (!product.thumbnail) errors.push("Main thumbnail image is required.");
-  if (!product.images.length) errors.push("At least one image is required.");
   if (!product.description) errors.push("Description is required.");
   return { product, errors };
 }
@@ -610,16 +844,24 @@ async function handleApi(req, res, url) {
 
   try {
     if (method === "GET" && pathname === "/api/health") {
-      return sendJson(res, 200, { ok: true });
+      return sendJson(res, 200, { ok: true, supabaseConfigured: supabaseEnabled() });
     }
 
     if (method === "GET" && pathname === "/api/settings") {
+      if (supabaseEnabled()) {
+        const settings = await supabaseSettings(db.settings);
+        return sendJson(res, 200, { settings: sanitizeSettings(settings) });
+      }
       return sendJson(res, 200, { settings: sanitizeSettings(db.settings) });
     }
 
     if (method === "GET" && pathname === "/api/products") {
       const q = clean(url.searchParams.get("q")).toLowerCase();
       const category = clean(url.searchParams.get("category"));
+      if (supabaseEnabled()) {
+        const payload = await supabaseProducts({ q, category, includeInactive: false });
+        return sendJson(res, 200, payload);
+      }
       let products = db.products;
       products.forEach(normalizeProduct);
       products = products.filter(product => product.status !== "inactive");
@@ -636,6 +878,10 @@ async function handleApi(req, res, url) {
 
     if (method === "GET" && pathname.startsWith("/api/products/")) {
       const id = decodeURIComponent(pathname.split("/").pop());
+      if (supabaseEnabled()) {
+        const product = await supabaseProductById(id, false);
+        return product ? sendJson(res, 200, { product }) : sendError(res, 404, "Product not found.");
+      }
       const product = db.products.find(item => item.id === id);
       if (product) normalizeProduct(product);
       return product ? sendJson(res, 200, { product }) : sendError(res, 404, "Product not found.");
@@ -709,7 +955,9 @@ async function handleApi(req, res, url) {
       if (!clean(address.city)) errors.push("City is required.");
       const orderItems = [];
       for (const item of items) {
-        const product = db.products.find(productItem => productItem.id === item.productId);
+        const product = supabaseEnabled()
+          ? await supabaseProductById(item.productId, false)
+          : db.products.find(productItem => productItem.id === item.productId);
         const qty = Number(item.qty);
         if (!product || !Number.isFinite(qty) || qty < 1) {
           errors.push("Invalid cart item.");
@@ -739,10 +987,12 @@ async function handleApi(req, res, url) {
         });
       }
       if (errors.length) return sendJson(res, 400, { errors });
-      orderItems.forEach(item => {
-        const product = db.products.find(productItem => productItem.id === item.productId);
-        product.stock -= item.qty;
-      });
+      if (!supabaseEnabled()) {
+        orderItems.forEach(item => {
+          const product = db.products.find(productItem => productItem.id === item.productId);
+          product.stock -= item.qty;
+        });
+      }
       const order = {
         id: uid("ord"),
         userId: user.id,
@@ -771,6 +1021,12 @@ async function handleApi(req, res, url) {
         createdAt: new Date().toISOString()
       };
       createLocalShipment(db, order);
+      if (supabaseEnabled()) {
+        const savedOrder = await supabaseInsertOrder(order);
+        db.orders.unshift(savedOrder);
+        writeDb(db);
+        return sendJson(res, 201, { order: savedOrder });
+      }
       db.orders.unshift(order);
       writeDb(db);
       return sendJson(res, 201, { order });
@@ -800,6 +1056,12 @@ async function handleApi(req, res, url) {
         status: "New",
         createdAt: new Date().toISOString()
       };
+      if (supabaseEnabled()) {
+        const savedApplication = await supabaseCreateSellerApplication(application);
+        db.sellerApplications.unshift(savedApplication);
+        writeDb(db);
+        return sendJson(res, 201, { message: "Thank you. Our team will contact you shortly.", application: savedApplication });
+      }
       db.sellerApplications.unshift(application);
       writeDb(db);
       return sendJson(res, 201, { message: "Thank you. Our team will contact you shortly.", application });
@@ -849,6 +1111,28 @@ async function handleApi(req, res, url) {
       if (!admin) return;
 
       if (method === "GET" && pathname === "/api/admin/summary") {
+        if (supabaseEnabled()) {
+          const client = supabaseWriteClient();
+          if (!client) throw new Error("Supabase is not configured.");
+          const [productsResult, ordersResult, applicationsResult] = await Promise.all([
+            client.from("products").select("id", { count: "exact", head: true }),
+            client.from("orders").select("id", { count: "exact", head: true }),
+            client.from("seller_applications").select("*").order("created_at", { ascending: false })
+          ]);
+          if (productsResult.error) throw new Error(`Supabase product count failed: ${productsResult.error.message}`);
+          if (ordersResult.error) throw new Error(`Supabase order count failed: ${ordersResult.error.message}`);
+          if (applicationsResult.error) throw new Error(`Supabase seller applications read failed: ${applicationsResult.error.message}`);
+          return sendJson(res, 200, {
+            totals: {
+              products: productsResult.count || 0,
+              orders: ordersResult.count || 0,
+              users: db.users.filter(user => user.role === "customer").length,
+              sellerApplications: applicationsResult.data.length
+            },
+            recentOrders: db.orders.slice(0, 5),
+            sellerApplications: applicationsResult.data.map(toAppSellerApplication)
+          });
+        }
         db.products.forEach(normalizeProduct);
         writeDb(db);
         return sendJson(res, 200, {
@@ -864,12 +1148,20 @@ async function handleApi(req, res, url) {
       }
 
       if (method === "GET" && pathname === "/api/admin/products") {
+        if (supabaseEnabled()) {
+          const payload = await supabaseProducts({ includeInactive: true });
+          return sendJson(res, 200, payload);
+        }
         db.products.forEach(normalizeProduct);
         writeDb(db);
         return sendJson(res, 200, { products: db.products, categories: [...new Set(db.products.map(item => item.category))] });
       }
 
       if (method === "GET" && pathname === "/api/admin/settings") {
+        if (supabaseEnabled()) {
+          const settings = await supabaseSettings(db.settings);
+          return sendJson(res, 200, { settings: sanitizeSettings(settings, true) });
+        }
         writeDb(db);
         return sendJson(res, 200, { settings: sanitizeSettings(db.settings, true) });
       }
@@ -880,6 +1172,9 @@ async function handleApi(req, res, url) {
         const body = await parseJson(req);
         db.settings[section] = mergeSection(db.settings[section], body);
         db.settings[section].updatedAt = new Date().toISOString();
+        if (supabaseEnabled()) {
+          await supabaseSaveSettingsSection(section, db.settings[section]);
+        }
         writeDb(db);
         return sendJson(res, 200, { settings: sanitizeSettings(db.settings, true) });
       }
@@ -942,7 +1237,12 @@ async function handleApi(req, res, url) {
         const { product, errors } = productPayload(body);
         if (errors.length) return sendJson(res, 400, { errors });
         product.id = uid("prod");
+        product.slug = slugify(product.name);
         product.createdAt = new Date().toISOString();
+        if (supabaseEnabled()) {
+          const saved = await supabaseCreateProduct(product);
+          return sendJson(res, 201, { product: saved });
+        }
         db.products.unshift(product);
         writeDb(db);
         return sendJson(res, 201, { product });
@@ -950,6 +1250,19 @@ async function handleApi(req, res, url) {
 
       if ((method === "PUT" || method === "DELETE") && pathname.startsWith("/api/admin/products/")) {
         const id = decodeURIComponent(pathname.split("/").pop());
+        if (supabaseEnabled()) {
+          const existing = await supabaseProductById(id, true);
+          if (!existing) return sendError(res, 404, "Product not found.");
+          if (method === "DELETE") {
+            const removed = await supabaseDeleteProduct(id);
+            return sendJson(res, 200, { product: removed });
+          }
+          const body = await parseJson(req);
+          const { product, errors } = productPayload(body, existing);
+          if (errors.length) return sendJson(res, 400, { errors });
+          const saved = await supabaseUpdateProduct(id, product);
+          return sendJson(res, 200, { product: saved });
+        }
         const index = db.products.findIndex(product => product.id === id);
         if (index === -1) return sendError(res, 404, "Product not found.");
         if (method === "DELETE") {
