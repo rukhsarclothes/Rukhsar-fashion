@@ -1,0 +1,18 @@
+{
+  "name": "rukhsar-fashion",
+  "version": "1.0.0",
+  "description": "Lightweight full-stack ecommerce website for Rukhsar Fashion.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node scripts/test.js",
+    "build": "node --check server.js && node --check public/app.js && node --check scripts/test.js"
+  },
+  "keywords": [
+    "ecommerce",
+    "fashion",
+    "vanilla-js"
+  ],
+  "author": "",
+  "license": "MIT"
+}

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#120817">
+    <meta name="description" content="Rukhsar Fashion - premium women's clothing ecommerce.">
+    <title>Rukhsar Fashion</title>
+    <link rel="preconnect" href="https://images.unsplash.com">
+    <link rel="stylesheet" href="/styles.css?v=6">
+  </head>
+  <body>
+    <div class="announcement-bar">Royal festive edits now live - complimentary shipping on prepaid orders</div>
+    <header class="site-header">
+      <a class="brand" href="#/">
+        <span class="brand-mark">RF</span>
+        <span>Rukhsar Fashion</span>
+      </a>
+      <nav class="top-nav" aria-label="Primary navigation">
+        <a href="#/products">Shop</a>
+        <a href="/collections/chikankari">Chikankari</a>
+        <a href="#/seller">Sell With Us</a>
+        <a href="#/orders">Orders</a>
+        <a href="#/cart" class="cart-link">Cart <span id="cartCount">0</span></a>
+        <a href="/admin" class="admin-nav-link">Admin</a>
+      </nav>
+      <button class="menu-button" id="menuButton" aria-label="Open menu">Menu</button>
+    </header>
+    <nav class="mobile-nav" id="mobileNav" aria-label="Mobile navigation">
+      <a href="#/products">Shop</a>
+      <a href="/collections/chikankari">Chikankari</a>
+      <a href="#/seller">Sell With Us</a>
+      <a href="#/orders">Orders</a>
+      <a href="#/cart">Cart</a>
+      <a href="#/login">Login</a>
+      <a href="/admin" class="admin-nav-link">Admin</a>
+    </nav>
+    <main id="app" tabindex="-1"></main>
+    <footer class="site-footer">
+      <div class="newsletter-block">
+        <span>Rukhsar Insider</span>
+        <strong>Enter the royal atelier for festive drops and Chikankari edits.</strong>
+        <form class="newsletter-form">
+          <input type="email" placeholder="Email address" aria-label="Newsletter email">
+          <button type="button">Join</button>
+        </form>
+      </div>
+      <div>
+        <strong id="footerStoreName">Rukhsar Fashion</strong>
+        <p id="footerTagline">Royal ethnic fashion with antique gold detail, refined silhouettes, and evening-ready elegance.</p>
+        <div id="socialLinks" class="social-links"></div>
+      </div>
+      <a href="/admin">Admin Access</a>
+    </footer>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js?v=6" defer></script>
+  </body>
+</html>
