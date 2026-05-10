@@ -2,13 +2,14 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const os = require("os");
 const { createClient } = require("@supabase/supabase-js");
 
 loadEnvFile(".env.local");
 loadEnvFile(".env");
 
 const PORT = process.env.PORT || 3000;
-const DATA_DIR = path.join(__dirname, "data");
+const DATA_DIR = process.env.VERCEL ? path.join(os.tmpdir(), "rukhsar-fashion-data") : path.join(__dirname, "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
 const PUBLIC_DIR = path.join(__dirname, "public");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
@@ -844,7 +845,12 @@ async function handleApi(req, res, url) {
 
   try {
     if (method === "GET" && pathname === "/api/health") {
-      return sendJson(res, 200, { ok: true, supabaseConfigured: supabaseEnabled() });
+      return sendJson(res, 200, {
+        ok: true,
+        supabaseConfigured: supabaseEnabled(),
+        supabaseServiceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY),
+        runtime: process.env.VERCEL ? "vercel" : "node"
+      });
     }
 
     if (method === "GET" && pathname === "/api/settings") {
