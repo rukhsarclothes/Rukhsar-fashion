@@ -3,7 +3,7 @@ require("../server");
 
 const email = String(process.env.ADMIN_EMAIL || "").trim().toLowerCase();
 const password = String(process.env.ADMIN_PASSWORD || "").trim();
-const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
+const url = process.env.SUPABASE_URL || "";
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
 
 async function main() {
@@ -58,7 +58,12 @@ async function upsertAdminRows(supabase, user) {
     email: user.email,
     updated_at: new Date().toISOString()
   }, { onConflict: "id" });
-  if (profile.error && profile.error.code !== "42P01") throw profile.error;
+  if (profile.error && !isMissingTable(profile.error)) {
+    throw profile.error;
+  }
+  if (profile.error) {
+    console.warn(`Profile table skipped: ${profile.error.message}`);
+  }
 
   const admin = await supabase.from("admin_users").upsert({
     user_id: user.id,
@@ -72,7 +77,14 @@ async function upsertAdminRows(supabase, user) {
     role: "admin",
     updated_at: new Date().toISOString()
   }, { onConflict: "user_id" });
-  if (role.error && role.error.code !== "42P01") throw role.error;
+  if (role.error && !isMissingTable(role.error)) throw role.error;
+  if (role.error) {
+    console.warn(`User role table skipped: ${role.error.message}`);
+  }
+}
+
+function isMissingTable(error) {
+  return error && (error.code === "42P01" || error.code === "PGRST205");
 }
 
 main().catch(error => {

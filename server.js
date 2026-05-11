@@ -15,14 +15,20 @@ const PUBLIC_DIR = path.join(__dirname, "public");
 const SESSION_TTL_MS = 1000 * 60 * 60 * 12;
 const SECRET_FIELDS = new Set(["razorpayKeySecret", "razorpayWebhookSecret", "shiprocketPassword", "shiprocketToken"]);
 const MAX_JSON_BYTES = 25 * 1024 * 1024;
-const SUPABASE_URL = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || "";
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || "";
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const ADMIN_EMAIL = cleanEnv(process.env.ADMIN_EMAIL).toLowerCase();
+const ADMIN_PASSWORD = cleanEnv(process.env.ADMIN_PASSWORD);
 const SESSION_SECRET = process.env.SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY || "rukhsar-local-dev-secret";
 const DISABLE_SUPABASE = process.env.DISABLE_SUPABASE === "1";
 const supabaseConfigErrors = [];
 const supabase = createSupabaseClient("anon", SUPABASE_URL, SUPABASE_ANON_KEY);
 const supabaseAdmin = createSupabaseClient("service", SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) || supabase;
+
+function cleanEnv(value) {
+  return String(value || "").trim();
+}
 
 function createSupabaseClient(label, url, key) {
   if (DISABLE_SUPABASE) return null;
@@ -36,6 +42,10 @@ function createSupabaseClient(label, url, key) {
     supabaseConfigErrors.push(`Supabase ${label} client failed to initialize: ${error.message}`);
     return null;
   }
+}
+
+function isMissingSupabaseTable(error) {
+  return error && (error.code === "42P01" || error.code === "PGRST205");
 }
 
 function loadEnvFile(fileName) {
@@ -801,14 +811,16 @@ async function supabaseRoleForUser(authUser) {
     client.from("user_roles").select("role").eq("user_id", authUser.id).maybeSingle(),
     client.from("admin_users").select("role,email").eq("user_id", authUser.id).maybeSingle()
   ]);
-  if (roleResult.error && roleResult.error.code !== "42P01") {
+  if (roleResult.error && !isMissingSupabaseTable(roleResult.error)) {
     console.warn("Supabase user_roles lookup failed:", roleResult.error.message);
   }
-  if (adminResult.error && adminResult.error.code !== "42P01") {
+  if (adminResult.error && !isMissingSupabaseTable(adminResult.error)) {
     console.warn("Supabase admin_users lookup failed:", adminResult.error.message);
   }
   const role = roleResult.data?.role || adminResult.data?.role || "customer";
-  return role === "admin" ? "admin" : "customer";
+  if (role === "admin") return "admin";
+  if (ADMIN_EMAIL && authUser.email?.toLowerCase() === ADMIN_EMAIL) return "admin";
+  return "customer";
 }
 
 async function supabaseEnsureProfile(authUser, role = "customer") {
@@ -821,7 +833,7 @@ async function supabaseEnsureProfile(authUser, role = "customer") {
     email: authUser.email,
     updated_at: new Date().toISOString()
   }, { onConflict: "id" });
-  if (profileResult.error && profileResult.error.code !== "42P01") {
+  if (profileResult.error && !isMissingSupabaseTable(profileResult.error)) {
     console.warn("Supabase profile upsert failed:", profileResult.error.message);
   }
   const roleResult = await client.from("user_roles").upsert({
@@ -829,9 +841,68 @@ async function supabaseEnsureProfile(authUser, role = "customer") {
     role,
     updated_at: new Date().toISOString()
   }, { onConflict: "user_id" });
-  if (roleResult.error && roleResult.error.code !== "42P01") {
+  if (roleResult.error && !isMissingSupabaseTable(roleResult.error)) {
     console.warn("Supabase role upsert failed:", roleResult.error.message);
   }
+}
+
+async function supabaseFindUserByEmail(email) {
+  const client = supabaseWriteClient();
+  if (!client?.auth?.admin) throw new Error("Supabase service role is required to manage admin users.");
+  for (let page = 1; page <= 20; page += 1) {
+    const { data, error } = await client.auth.admin.listUsers({ page, perPage: 100 });
+    if (error) throw error;
+    const match = data.users.find(item => item.email?.toLowerCase() === email);
+    if (match) return match;
+    if (data.users.length < 100) return null;
+  }
+  return null;
+}
+
+async function supabaseUpsertAdminRole(authUser) {
+  const client = supabaseWriteClient();
+  if (!client || !authUser?.id) throw new Error("Supabase service role is required to assign admin role.");
+  await supabaseEnsureProfile(authUser, "admin");
+  const adminResult = await client.from("admin_users").upsert({
+    user_id: authUser.id,
+    email: authUser.email,
+    role: "admin"
+  }, { onConflict: "user_id" });
+  if (adminResult.error) throw adminResult.error;
+  const roleResult = await client.from("user_roles").upsert({
+    user_id: authUser.id,
+    role: "admin",
+    updated_at: new Date().toISOString()
+  }, { onConflict: "user_id" });
+  if (roleResult.error && !isMissingSupabaseTable(roleResult.error)) throw roleResult.error;
+}
+
+async function ensureConfiguredAdminUser() {
+  if (!ADMIN_EMAIL || !ADMIN_PASSWORD) return { ok: false, reason: "ADMIN_EMAIL or ADMIN_PASSWORD missing." };
+  if (!supabaseAdmin?.auth?.admin) return { ok: false, reason: "SUPABASE_SERVICE_ROLE_KEY missing." };
+  const existing = await supabaseFindUserByEmail(ADMIN_EMAIL);
+  let user = existing;
+  if (existing) {
+    const { data, error } = await supabaseAdmin.auth.admin.updateUserById(existing.id, {
+      email: ADMIN_EMAIL,
+      password: ADMIN_PASSWORD,
+      email_confirm: true,
+      user_metadata: { full_name: existing.user_metadata?.full_name || "Rukhsar Admin" }
+    });
+    if (error) throw error;
+    user = data.user;
+  } else {
+    const { data, error } = await supabaseAdmin.auth.admin.createUser({
+      email: ADMIN_EMAIL,
+      password: ADMIN_PASSWORD,
+      email_confirm: true,
+      user_metadata: { full_name: "Rukhsar Admin" }
+    });
+    if (error) throw error;
+    user = data.user;
+  }
+  await supabaseUpsertAdminRole(user);
+  return { ok: true, userId: user.id, email: user.email };
 }
 
 async function supabaseSessionFromToken(accessToken, requiredRole = "") {
@@ -986,10 +1057,23 @@ async function handleApi(req, res, url) {
 
   try {
     if (method === "GET" && pathname === "/api/health") {
+      let supabaseReachable = false;
+      if (supabase) {
+        const probe = await supabase.from("products").select("id", { count: "exact", head: true });
+        supabaseReachable = !probe.error;
+      }
       return sendJson(res, 200, {
         ok: true,
+        env: {
+          SUPABASE_URL: Boolean(SUPABASE_URL),
+          SUPABASE_ANON_KEY: Boolean(SUPABASE_ANON_KEY),
+          SUPABASE_SERVICE_ROLE_KEY: Boolean(SUPABASE_SERVICE_ROLE_KEY),
+          ADMIN_EMAIL: Boolean(ADMIN_EMAIL),
+          ADMIN_PASSWORD: Boolean(ADMIN_PASSWORD)
+        },
         supabaseConfigured: supabaseEnabled(),
         supabaseServiceRoleConfigured: Boolean(SUPABASE_SERVICE_ROLE_KEY && supabaseAdmin),
+        supabaseReachable,
         supabaseConfigErrors,
         runtime: process.env.VERCEL ? "vercel" : "node"
       });
@@ -1072,20 +1156,47 @@ async function handleApi(req, res, url) {
 
     if (method === "POST" && pathname === "/api/auth/login") {
       const body = await parseJson(req);
+      const email = clean(body.email).toLowerCase();
+      const password = clean(body.password);
       if (supabaseEnabled()) {
         try {
-          const session = await supabasePasswordAuth(clean(body.email).toLowerCase(), clean(body.password), "login");
+          if (email === ADMIN_EMAIL) {
+            if (password !== ADMIN_PASSWORD) {
+              logLogin(db, email, "failed", req);
+              writeDb(db);
+              return sendError(res, 401, "Invalid email or password.");
+            }
+            const bootstrap = await ensureConfiguredAdminUser();
+            if (!bootstrap.ok) {
+              console.error("Configured admin bootstrap failed:", bootstrap.reason);
+              return sendError(res, 500, "Admin login is not configured on the server.");
+            }
+          }
+          const session = await supabasePasswordAuth(email, password, "login");
+          if (email === ADMIN_EMAIL && session.user.role !== "admin") {
+            console.error("Configured admin account exists but is missing admin role:", email);
+            return sendError(res, 403, "Account exists but is not admin.");
+          }
           logLogin(db, session.user.email, "success", req);
           writeDb(db);
           return sendJson(res, 200, session);
         } catch (error) {
           const expected = /invalid login credentials|email not confirmed/i.test(error.message);
-          if (!expected) console.warn("Supabase password login failed:", error.message);
+          if (expected) {
+            console.warn(`Supabase password login failed for ${email}: ${error.message}`);
+          } else {
+            console.error(`Supabase password login failed for ${email}:`, error.message);
+          }
+          if (email === ADMIN_EMAIL) {
+            logLogin(db, email, "failed", req);
+            writeDb(db);
+            return sendError(res, expected ? 401 : 500, expected ? "Invalid email or password." : "Admin login failed on the server.");
+          }
         }
       }
-      const user = db.users.find(item => item.email === clean(body.email).toLowerCase());
-      if (!user || !verifyPassword(clean(body.password), user.passwordHash)) {
-        logLogin(db, body.email, "failed", req);
+      const user = db.users.find(item => item.email === email);
+      if (!user || !verifyPassword(password, user.passwordHash)) {
+        logLogin(db, email, "failed", req);
         writeDb(db);
         return sendError(res, 401, "Invalid email or password.");
       }

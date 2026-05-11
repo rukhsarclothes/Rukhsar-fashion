@@ -18,6 +18,15 @@ VITE_SUPABASE_ANON_KEY=your-anon-key
 
 `SUPABASE_SERVICE_ROLE_KEY` is required for server-side admin writes and server-side role verification. Never expose the service role key in frontend code or as a `VITE_*` variable.
 
+Server code reads only these server variables:
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
+
+The `VITE_*` variables are public frontend compatibility variables only. Do not use them for server secrets.
+
 ## SQL Schema
 
 Run [supabase/schema.sql](supabase/schema.sql) in the Supabase SQL Editor.
@@ -85,6 +94,8 @@ npm run create-admin
 
 The script uses `SUPABASE_URL` and server-only `SUPABASE_SERVICE_ROLE_KEY` from `.env.local` or environment variables. It creates/updates the Supabase Auth user and assigns admin role in `admin_users` and `user_roles`.
 
+Production also self-repairs the configured admin during `/api/auth/login`: when the submitted email/password match `ADMIN_EMAIL` and `ADMIN_PASSWORD`, the server creates or updates the Supabase Auth user, confirms the email, and upserts the admin role rows before completing password login.
+
 Manual SQL alternative after the admin user already exists:
 
 ```sql
@@ -147,7 +158,15 @@ http://localhost:3000/collections/chikankari
 ```json
 {
   "ok": true,
-  "supabaseConfigured": true
+  "env": {
+    "SUPABASE_URL": true,
+    "SUPABASE_ANON_KEY": true,
+    "SUPABASE_SERVICE_ROLE_KEY": true,
+    "ADMIN_EMAIL": true,
+    "ADMIN_PASSWORD": true
+  },
+  "supabaseConfigured": true,
+  "supabaseReachable": true
 }
 ```
 
