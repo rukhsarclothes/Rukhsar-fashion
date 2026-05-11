@@ -12,8 +12,12 @@ const state = {
   deleteProductId: null,
   settings: null,
   settingsTab: "general",
-  authConfig: null
+  authConfig: null,
+  adminCache: null,
+  adminVerifiedAt: 0
 };
+
+const DEBUG_API = false;
 
 function sanitizeToken(value) {
   const token = String(value || "").trim();
@@ -225,7 +229,7 @@ async function api(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (hasValidToken()) headers.Authorization = `Bearer ${state.token}`;
   else delete headers.Authorization;
-  console.info(`[API] ${options.method || "GET"} ${url}`);
+  if (DEBUG_API) console.info(`[API] ${options.method || "GET"} ${url}`);
   let response;
   try {
     response = await fetch(url, { ...options, headers });
@@ -234,7 +238,7 @@ async function api(path, options = {}) {
     throw new Error(`Could not reach the server while calling ${url}. Please confirm the local server is running and try again.`);
   }
   const payload = await response.json().catch(() => ({}));
-  console.info(`[API] ${response.status} ${url}`, payload);
+  if (DEBUG_API) console.info(`[API] ${response.status} ${url}`, payload);
   if (!response.ok) {
     const message = payload.error || (payload.errors || ["Something went wrong."]).join(" ");
     throw new Error(message);
@@ -306,6 +310,7 @@ async function verifyCurrentSession(requiredRole = "") {
     state.user = user;
     localStorage.setItem("rf_user", JSON.stringify(user));
     updateAdminVisibility(Boolean(payload.isAdmin));
+    if (payload.isAdmin) state.adminVerifiedAt = Date.now();
     if (requiredRole && user.role !== requiredRole) {
       throw new Error(requiredRole === "admin" ? "This account is not admin." : "Access denied.");
     }
@@ -317,6 +322,47 @@ async function verifyCurrentSession(requiredRole = "") {
     }
     throw error;
   }
+}
+
+async function ensureAdminAccess() {
+  const recentlyVerified = Date.now() - state.adminVerifiedAt < 60_000;
+  if (recentlyVerified && state.user?.role === "admin" && hasValidToken()) return state.user;
+  return verifyCurrentSession("admin");
+}
+
+async function loadAdminData(options = {}) {
+  const { force = false, includeSettings = false, includeUsers = false } = options;
+  if (force || !state.adminCache) {
+    const [summary, products, orders] = await Promise.all([
+      api("/api/admin/summary"),
+      api("/api/admin/products"),
+      api("/api/orders")
+    ]);
+    state.adminCache = {
+      summary,
+      products: products.products,
+      orders: orders.orders,
+      users: null,
+      settings: null
+    };
+  }
+  const requests = [];
+  if (includeUsers && !state.adminCache.users) {
+    requests.push(api("/api/admin/users").then(payload => {
+      state.adminCache.users = payload.users;
+    }));
+  }
+  if (includeSettings && !state.adminCache.settings) {
+    requests.push(loadSettings(true).then(settings => {
+      state.adminCache.settings = settings;
+    }));
+  }
+  if (requests.length) await Promise.all(requests);
+  return state.adminCache;
+}
+
+function invalidateAdminCache() {
+  state.adminCache = null;
 }
 
 async function refreshVerifiedSession() {
@@ -371,12 +417,11 @@ function shell(title, body) {
 }
 
 function productCard(product) {
-  const badges = product.featured ? ["Best Seller"] : product.category === "chikankari" ? ["Trending"] : ["New"];
+  const discount = productDiscountPercent(product);
   return `
     <article class="product-card">
-      <div class="product-badges">${badges.map(badge => `<span>${badge}</span>`).join("")}</div>
       <button class="wishlist-btn" type="button" aria-label="Add ${product.name} to wishlist">♡</button>
-      <a href="#/product/${product.id}">
+      <a class="product-image-link" href="#/product/${product.id}">
         ${imageTag(productImage(product), product.name, "", 'loading="lazy"')}
       </a>
       <div class="product-body">
@@ -385,11 +430,12 @@ function productCard(product) {
         <div class="price-row">
           <span>${money(discountPrice(product))}</span>
           ${discountPrice(product) < product.price ? `<del>${money(product.price)}</del>` : ""}
+          ${discount ? `<em>${discount}% off</em>` : ""}
         </div>
         <div class="size-list" aria-label="Available sizes">
           ${(product.sizes || []).map(size => `<span>${size}</span>`).join("")}
         </div>
-        <a class="quick-view-btn" href="#/product/${product.id}">Explore Piece</a>
+        <a class="quick-view-btn" href="#/product/${product.id}">Add to Cart</a>
       </div>
     </article>
   `;
@@ -401,14 +447,14 @@ async function renderHome() {
   const activeProducts = state.products.filter(isActiveProduct);
   const featured = activeProducts.filter(product => product.featured).slice(0, 4);
   const chikankari = activeProducts.filter(product => product.category === "chikankari").slice(0, 4);
-  const heroTitle = "Crafted for the Royal You";
-  const heroSubtitle = "Arabic-inspired luxury ethnic wear with antique gold detail, fluid silhouettes, and celebration-ready elegance.";
+  const heroTitle = "Modern Royal Ethnic Wear";
+  const heroSubtitle = "Luxury ethnic wear shaped with antique gold detail, graceful silhouettes, and celebration-ready ease.";
   const chikankariCopy = state.settings.homepage.chikankariCopy === "Timeless hand-embroidered elegance for every occasion." ? "Timeless hand embroidery crafted for modern elegance." : state.settings.homepage.chikankariCopy;
   app.innerHTML = `
     <section class="hero">
       <div class="hero-ornament" aria-hidden="true"></div>
       <div class="hero-content">
-        <div class="eyebrow">Rukhsar Royal Atelier</div>
+        <div class="eyebrow">Rukhsar Atelier</div>
         <h1>${heroTitle}</h1>
         <p>${heroSubtitle}</p>
         <div class="actions">
@@ -426,7 +472,7 @@ async function renderHome() {
     ${state.settings.homepage.featuredProductsEnabled ? `<section class="page">
       <div class="section-head">
         <div>
-          <div class="eyebrow">Royal wardrobe</div>
+          <div class="eyebrow">Curated wardrobe</div>
           <h2>Featured pieces</h2>
         </div>
         <a href="#/products">View all</a>
@@ -435,7 +481,7 @@ async function renderHome() {
     </section>` : ""}
     ${state.settings.homepage.collectionSectionEnabled && state.settings.homepage.chikankariEnabled ? `<section class="collection-band">
       <div>
-        <div class="eyebrow">Royal signature collection</div>
+        <div class="eyebrow">Signature collection</div>
         <h2>Chikankari Collection</h2>
         <p>${chikankariCopy}</p>
       </div>
@@ -636,9 +682,9 @@ function renderAdminLogin() {
       <form data-form="admin-login" class="admin-login-card form-grid">
         <div>
           <div class="brand admin-brand"><span class="brand-mark">RF</span><span>Rukhsar Fashion</span></div>
-          <div class="eyebrow">Admin Studio</div>
+          <div class="eyebrow">Executive Access</div>
           <h1>Admin login</h1>
-          <p>Manage collections, orders, seller applications, and product media from one polished workspace.</p>
+          <p>Manage products, orders, seller applications, settings, and customers from one secure workspace.</p>
         </div>
         <div class="field"><label>Email</label><input type="email" name="email" value="admin@rukhsarfashion.com" required></div>
         <div class="field"><label>Password</label><input type="password" name="password" required></div>
@@ -670,9 +716,9 @@ async function renderAdmin() {
     navigate("/admin");
     return;
   }
-  app.innerHTML = `<section class="admin-login-page"><div class="admin-login-card admin-loading"><div class="eyebrow">Secure Gateway</div><h1>Verifying command access</h1><p>Please wait while the control center validates your admin session.</p><div class="skeleton-lines"><span></span><span></span><span></span></div></div></section>`;
+  app.innerHTML = `<section class="admin-login-page"><div class="admin-login-card admin-loading"><div class="eyebrow">Secure Gateway</div><h1>Verifying access</h1><p>Please wait while your admin session is confirmed.</p><div class="skeleton-lines"><span></span><span></span><span></span></div></div></section>`;
   try {
-    const user = await verifyCurrentSession("admin");
+    const user = await ensureAdminAccess();
     if (!user) {
       navigate("/admin");
       return;
@@ -687,13 +733,15 @@ async function renderAdmin() {
     toast(error.message);
     return;
   }
-  const [summary, products, orders, users, settings] = await Promise.all([
-    api("/api/admin/summary"),
-    api("/api/admin/products"),
-    api("/api/orders"),
-    api("/api/admin/users"),
-    loadSettings(true)
-  ]);
+  const adminData = await loadAdminData({
+    includeSettings: state.adminTab === "settings",
+    includeUsers: state.adminTab === "users"
+  });
+  const summary = adminData.summary;
+  const products = adminData.products;
+  const orders = adminData.orders;
+  const users = adminData.users || [];
+  const settings = adminData.settings || state.settings;
   app.innerHTML = `
     <section class="admin-shell">
       <aside class="admin-sidebar">
@@ -712,15 +760,15 @@ async function renderAdmin() {
       <div class="admin-main">
         <header class="admin-topbar">
           <div>
-            <div class="eyebrow">Command Center</div>
+            <div class="eyebrow">Executive Dashboard</div>
             <h1>${adminTitle()}</h1>
-            <p>Live operational controls for products, orders, sellers, settings, and customer access.</p>
+            <p>Fast operational controls for products, orders, sellers, settings, and customer access.</p>
           </div>
           <button class="btn secondary" data-action="admin-tab" data-tab="add">Add Product</button>
         </header>
-        <section id="adminContent">${adminTabContent(summary, products.products, orders.orders, users.users, settings)}</section>
+        <section id="adminContent">${adminTabContent(summary, products, orders, users, settings)}</section>
       </div>
-      ${state.deleteProductId ? deleteModal(products.products.find(product => product.id === state.deleteProductId)) : ""}
+      ${state.deleteProductId ? deleteModal(products.find(product => product.id === state.deleteProductId)) : ""}
     </section>
   `;
 }
@@ -1118,6 +1166,7 @@ const handlers = {
   logout: async () => {
     await api("/api/auth/logout", { method: "POST" }).catch(() => {});
     clearSession();
+    invalidateAdminCache();
     navigate("/admin");
   },
   "admin-tab": (event, button) => {
@@ -1194,6 +1243,7 @@ const handlers = {
   },
   "delete-product": async (event, button) => {
     await api(`/api/admin/products/${button.dataset.id}`, { method: "DELETE" });
+    invalidateAdminCache();
     state.deleteProductId = null;
     toast("Product deleted.");
     renderAdmin();
@@ -1203,6 +1253,7 @@ const handlers = {
       method: "PATCH",
       body: JSON.stringify({ status: select.value })
     });
+    invalidateAdminCache();
     toast("Order status updated.");
   }
 };
@@ -1469,6 +1520,7 @@ const formHandlers = {
         }
       });
       await api(path, { method, body: JSON.stringify(payload) });
+      invalidateAdminCache();
       toast(id ? "Product updated." : "Product added.");
       state.editingProduct = null;
       state.adminTab = "products";
@@ -1484,6 +1536,7 @@ const formHandlers = {
       const payload = await settingsFormPayload(form);
       const result = await api(`/api/admin/settings/${form.dataset.section}`, { method: "PUT", body: JSON.stringify(payload) });
       state.settings = result.settings;
+      if (state.adminCache) state.adminCache.settings = result.settings;
       applyPublicSettings(result.settings);
       toast("Settings saved.");
       renderAdmin();
