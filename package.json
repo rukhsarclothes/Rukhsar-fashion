@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "test": "node scripts/test.js",
-    "build": "node --check server.js && node --check public/app.js && node --check scripts/test.js && node --check api/index.js && node --check api/[...path].js"
+    "create-admin": "node scripts/create-admin.js",
+    "build": "node --check server.js && node --check public/app.js && node --check scripts/test.js && node --check scripts/create-admin.js && node --check api/index.js && node --check api/[...path].js"
   },
   "keywords": [
     "ecommerce",

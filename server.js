@@ -938,8 +938,8 @@ function productPayload(body, existing = {}) {
 
 async function getAuth(req, db) {
   const header = req.headers.authorization || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
-  if (!token) return null;
+  const token = header.startsWith("Bearer ") ? clean(header.slice(7)) : "";
+  if (!token || token === "null" || token === "undefined" || token === "false") return null;
   const signedUser = verifySessionToken(token, db);
   if (signedUser) return signedUser;
   const now = Date.now();
@@ -952,7 +952,9 @@ async function getAuth(req, db) {
       const verified = await supabaseSessionFromToken(token);
       return verified.user;
     } catch (error) {
-      console.warn("Supabase token verification failed:", error.message);
+      if (!/invalid jwt|unable to parse|jwt malformed/i.test(error.message)) {
+        console.warn("Supabase token verification failed:", error.message);
+      }
     }
   }
   return null;
@@ -1077,7 +1079,8 @@ async function handleApi(req, res, url) {
           writeDb(db);
           return sendJson(res, 200, session);
         } catch (error) {
-          console.warn("Supabase password login failed:", error.message);
+          const expected = /invalid login credentials|email not confirmed/i.test(error.message);
+          if (!expected) console.warn("Supabase password login failed:", error.message);
         }
       }
       const user = db.users.find(item => item.email === clean(body.email).toLowerCase());
@@ -1111,7 +1114,7 @@ async function handleApi(req, res, url) {
       return sendJson(res, 200, { ok: true });
     }
 
-    if (method === "GET" && pathname === "/api/me") {
+    if (method === "GET" && (pathname === "/api/me" || pathname === "/api/auth/me")) {
       const user = await requireAuth(req, res, db);
       if (!user) return;
       writeDb(db);

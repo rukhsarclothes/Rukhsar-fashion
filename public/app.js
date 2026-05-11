@@ -2,7 +2,7 @@ const state = {
   products: [],
   categories: [],
   user: JSON.parse(localStorage.getItem("rf_user") || "null"),
-  token: localStorage.getItem("rf_token") || "",
+  token: sanitizeToken(localStorage.getItem("rf_token")),
   cart: JSON.parse(localStorage.getItem("rf_cart") || "[]"),
   adminTab: "dashboard",
   adminSearch: "",
@@ -14,6 +14,18 @@ const state = {
   settingsTab: "general",
   authConfig: null
 };
+
+function sanitizeToken(value) {
+  const token = String(value || "").trim();
+  if (!token || token === "null" || token === "undefined" || token === "false" || token === "Bearer") return "";
+  return token;
+}
+
+function hasValidToken() {
+  state.token = sanitizeToken(state.token);
+  if (!state.token) localStorage.removeItem("rf_token");
+  return Boolean(state.token);
+}
 
 const categoryLabels = {
   chikankari: "Chikankari Collection"
@@ -154,8 +166,9 @@ function videoMarkup(url) {
 }
 
 function saveSession(payload) {
-  state.token = payload.token;
+  state.token = sanitizeToken(payload.token);
   state.user = payload.user;
+  if (!state.token || !state.user) throw new Error("Login did not return a valid session.");
   localStorage.setItem("rf_token", state.token);
   localStorage.setItem("rf_user", JSON.stringify(state.user));
 }
@@ -200,7 +213,8 @@ function setButtonLoading(form, isLoading, label = "Please wait...") {
 async function api(path, options = {}) {
   const url = new URL(path, window.location.origin).toString();
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  if (state.token) headers.Authorization = `Bearer ${state.token}`;
+  if (hasValidToken()) headers.Authorization = `Bearer ${state.token}`;
+  else delete headers.Authorization;
   console.info(`[API] ${options.method || "GET"} ${url}`);
   let response;
   try {
@@ -265,6 +279,28 @@ async function processAuthCallback() {
     shell(`<div><div class="eyebrow">Login</div><h2>Authentication failed</h2></div>`, `<div class="message error">${error.message}</div>`);
   }
   return true;
+}
+
+async function verifyCurrentSession(requiredRole = "") {
+  if (!hasValidToken()) {
+    clearSession();
+    return null;
+  }
+  try {
+    const { user } = await api("/api/auth/me");
+    state.user = user;
+    localStorage.setItem("rf_user", JSON.stringify(user));
+    if (requiredRole && user.role !== requiredRole) {
+      throw new Error(requiredRole === "admin" ? "This account is not admin." : "Access denied.");
+    }
+    return user;
+  } catch (error) {
+    clearSession();
+    if (/login|session|jwt|token|unauthorized/i.test(error.message)) {
+      throw new Error("Session expired, please login again.");
+    }
+    throw error;
+  }
 }
 
 async function loadProducts(params = "") {
@@ -585,8 +621,20 @@ function renderAdminLogin() {
 }
 
 async function renderAdmin() {
-  if (!state.user || state.user.role !== "admin") {
+  if (!hasValidToken()) {
     navigate("/admin");
+    return;
+  }
+  app.innerHTML = `<section class="admin-login-page"><div class="admin-login-card"><div class="eyebrow">Admin Studio</div><h1>Checking session...</h1><p>Please wait while we verify your dashboard access.</p></div></section>`;
+  try {
+    const user = await verifyCurrentSession("admin");
+    if (!user) {
+      navigate("/admin");
+      return;
+    }
+  } catch (error) {
+    navigate("/admin");
+    toast(error.message);
     return;
   }
   const [summary, products, orders, users, settings] = await Promise.all([

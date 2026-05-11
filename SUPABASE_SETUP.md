@@ -10,6 +10,8 @@ Local development uses `.env.local`:
 SUPABASE_URL=https://waujhojqvabhyqykgeft.supabase.co
 SUPABASE_ANON_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=optional-server-only-service-role-key
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=change-this-password
 VITE_SUPABASE_URL=https://waujhojqvabhyqykgeft.supabase.co
 VITE_SUPABASE_ANON_KEY=your-anon-key
 ```
@@ -65,7 +67,25 @@ The app uses these callback URLs:
 
 ## Add an Admin User
 
-Admin access is server-verified from Supabase. After the admin signs in once with Google or email/password, run this SQL with their email:
+Admin access is server-verified from Supabase.
+
+Recommended setup:
+
+```bash
+ADMIN_EMAIL=admin@example.com ADMIN_PASSWORD=change-this-password npm run create-admin
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:ADMIN_EMAIL="admin@example.com"
+$env:ADMIN_PASSWORD="change-this-password"
+npm run create-admin
+```
+
+The script uses `SUPABASE_URL` and server-only `SUPABASE_SERVICE_ROLE_KEY` from `.env.local` or environment variables. It creates/updates the Supabase Auth user and assigns admin role in `admin_users` and `user_roles`.
+
+Manual SQL alternative after the admin user already exists:
 
 ```sql
 insert into public.admin_users (user_id, email, role)
