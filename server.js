@@ -1226,10 +1226,25 @@ async function handleApi(req, res, url) {
     }
 
     if (method === "GET" && (pathname === "/api/me" || pathname === "/api/auth/me")) {
-      const user = await requireAuth(req, res, db);
-      if (!user) return;
+      const user = await getAuth(req, db);
+      if (!user) {
+        return sendJson(res, 200, {
+          loggedIn: false,
+          email: "",
+          role: "",
+          isAdmin: false,
+          user: null
+        });
+      }
       writeDb(db);
-      return sendJson(res, 200, { user: publicUser(user) });
+      const publicSessionUser = publicUser(user);
+      return sendJson(res, 200, {
+        loggedIn: true,
+        email: publicSessionUser.email,
+        role: publicSessionUser.role,
+        isAdmin: publicSessionUser.role === "admin",
+        user: publicSessionUser
+      });
     }
 
     if (method === "GET" && pathname === "/api/orders") {

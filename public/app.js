@@ -44,6 +44,7 @@ const app = document.querySelector("#app");
 const cartCount = document.querySelector("#cartCount");
 const toastEl = document.querySelector("#toast");
 const mobileNav = document.querySelector("#mobileNav");
+const adminNavLinks = document.querySelectorAll(".admin-nav-link");
 const FALLBACK_IMAGE = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='900' height='1200' viewBox='0 0 900 1200'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1' y1='0' y2='1'%3E%3Cstop stop-color='%2315091d'/%3E%3Cstop offset='1' stop-color='%2324102f'/%3E%3C/linearGradient%3E%3Cpattern id='p' width='90' height='90' patternUnits='userSpaceOnUse'%3E%3Cpath d='M45 0 90 45 45 90 0 45Z' fill='none' stroke='%23d7b56d' stroke-opacity='.28' stroke-width='2'/%3E%3C/pattern%3E%3C/defs%3E%3Crect width='900' height='1200' fill='url(%23g)'/%3E%3Crect width='900' height='1200' fill='url(%23p)' opacity='.5'/%3E%3Crect x='70' y='70' width='760' height='1060' rx='36' fill='none' stroke='%23d7b56d' stroke-opacity='.55' stroke-width='3'/%3E%3Ctext x='450' y='590' text-anchor='middle' fill='%23f2d993' font-family='Georgia,serif' font-size='54'%3ERukhsar%3C/text%3E%3Ctext x='450' y='655' text-anchor='middle' fill='%23fff6df' fill-opacity='.76' font-family='Arial,sans-serif' font-size='28'%3EFashion%3C/text%3E%3C/svg%3E";
 window.RF_FALLBACK_IMAGE = FALLBACK_IMAGE;
 
@@ -171,6 +172,7 @@ function saveSession(payload) {
   if (!state.token || !state.user) throw new Error("Login did not return a valid session.");
   localStorage.setItem("rf_token", state.token);
   localStorage.setItem("rf_user", JSON.stringify(state.user));
+  updateAdminVisibility(state.user.role === "admin");
 }
 
 function clearSession() {
@@ -179,6 +181,7 @@ function clearSession() {
   localStorage.removeItem("rf_token");
   localStorage.removeItem("rf_user");
   sessionStorage.removeItem("rf_oauth_role");
+  updateAdminVisibility(false);
 }
 
 function saveCart() {
@@ -195,6 +198,13 @@ function toast(message) {
 function showFormMessage(form, message, type = "success") {
   form.parentElement?.querySelectorAll(".message.form-message").forEach(node => node.remove());
   form.insertAdjacentHTML("beforebegin", `<div class="message form-message ${type}">${message}</div>`);
+}
+
+function updateAdminVisibility(isAdmin = false) {
+  adminNavLinks.forEach(link => {
+    link.hidden = !isAdmin;
+    link.classList.toggle("verified-admin", isAdmin);
+  });
 }
 
 function setButtonLoading(form, isLoading, label = "Please wait...") {
@@ -287,9 +297,15 @@ async function verifyCurrentSession(requiredRole = "") {
     return null;
   }
   try {
-    const { user } = await api("/api/auth/me");
+    const payload = await api("/api/auth/me");
+    if (!payload.loggedIn || !payload.user) {
+      clearSession();
+      return null;
+    }
+    const { user } = payload;
     state.user = user;
     localStorage.setItem("rf_user", JSON.stringify(user));
+    updateAdminVisibility(Boolean(payload.isAdmin));
     if (requiredRole && user.role !== requiredRole) {
       throw new Error(requiredRole === "admin" ? "This account is not admin." : "Access denied.");
     }
@@ -300,6 +316,19 @@ async function verifyCurrentSession(requiredRole = "") {
       throw new Error("Session expired, please login again.");
     }
     throw error;
+  }
+}
+
+async function refreshVerifiedSession() {
+  if (!hasValidToken()) {
+    updateAdminVisibility(false);
+    return null;
+  }
+  try {
+    return await verifyCurrentSession();
+  } catch (error) {
+    updateAdminVisibility(false);
+    return null;
   }
 }
 
@@ -620,12 +649,28 @@ function renderAdminLogin() {
   `;
 }
 
+function renderNotAuthorized(message = "Not authorized") {
+  app.innerHTML = `
+    <section class="admin-login-page">
+      <div class="admin-login-card admin-denied">
+        <div class="eyebrow">Access Control</div>
+        <h1>${message}</h1>
+        <p>This account is signed in, but it is not authorized for the Rukhsar Fashion admin control center.</p>
+        <div class="actions">
+          <a class="btn ghost" href="#/">Return to Store</a>
+          <button class="btn danger" data-action="logout">Logout</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 async function renderAdmin() {
   if (!hasValidToken()) {
     navigate("/admin");
     return;
   }
-  app.innerHTML = `<section class="admin-login-page"><div class="admin-login-card"><div class="eyebrow">Admin Studio</div><h1>Checking session...</h1><p>Please wait while we verify your dashboard access.</p></div></section>`;
+  app.innerHTML = `<section class="admin-login-page"><div class="admin-login-card admin-loading"><div class="eyebrow">Secure Gateway</div><h1>Verifying command access</h1><p>Please wait while the control center validates your admin session.</p><div class="skeleton-lines"><span></span><span></span><span></span></div></div></section>`;
   try {
     const user = await verifyCurrentSession("admin");
     if (!user) {
@@ -633,6 +678,11 @@ async function renderAdmin() {
       return;
     }
   } catch (error) {
+    if (/not admin|not authorized|access denied/i.test(error.message)) {
+      renderNotAuthorized("Not authorized");
+      return;
+    }
+    clearSession();
     navigate("/admin");
     toast(error.message);
     return;
@@ -649,20 +699,22 @@ async function renderAdmin() {
       <aside class="admin-sidebar">
         <div class="brand admin-brand"><span class="brand-mark">RF</span><span>Rukhsar Fashion</span></div>
         <nav class="admin-nav" aria-label="Admin navigation">
-          ${adminNavButton("dashboard", "Dashboard")}
-          ${adminNavButton("products", "Products")}
-          ${adminNavButton("add", "Add Product")}
-          ${adminNavButton("orders", "Orders")}
-          ${adminNavButton("applications", "Seller Applications")}
-          ${adminNavButton("settings", "Settings")}
-          <button data-action="logout">Logout</button>
+          ${adminNavButton("dashboard", "Dashboard", "01")}
+          ${adminNavButton("products", "Products", "02")}
+          ${adminNavButton("add", "Add Product", "03")}
+          ${adminNavButton("orders", "Orders", "04")}
+          ${adminNavButton("applications", "Seller Applications", "05")}
+          ${adminNavButton("settings", "Settings", "06")}
+          ${adminNavButton("users", "Users", "07")}
+          <button data-action="logout"><span class="nav-icon">08</span><span>Logout</span></button>
         </nav>
       </aside>
       <div class="admin-main">
         <header class="admin-topbar">
           <div>
-            <div class="eyebrow">Admin Studio</div>
+            <div class="eyebrow">Command Center</div>
             <h1>${adminTitle()}</h1>
+            <p>Live operational controls for products, orders, sellers, settings, and customer access.</p>
           </div>
           <button class="btn secondary" data-action="admin-tab" data-tab="add">Add Product</button>
         </header>
@@ -673,8 +725,8 @@ async function renderAdmin() {
   `;
 }
 
-function adminNavButton(tab, label) {
-  return `<button data-action="admin-tab" data-tab="${tab}" class="${state.adminTab === tab ? "active" : ""}">${label}</button>`;
+function adminNavButton(tab, label, icon = "") {
+  return `<button data-action="admin-tab" data-tab="${tab}" class="${state.adminTab === tab ? "active" : ""}">${icon ? `<span class="nav-icon">${icon}</span>` : ""}<span>${label}</span></button>`;
 }
 
 function adminTitle() {
@@ -685,19 +737,24 @@ function adminTitle() {
     orders: "Orders",
     applications: "Seller Applications",
     settings: "Settings",
-    customers: "Customers"
+    users: "Users"
   };
   return titles[state.adminTab] || "Dashboard";
 }
 
 function adminTabContent(summary, products, orders, users, settings) {
   if (state.adminTab === "dashboard") {
+    const revenue = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
+    const lowStock = products.filter(product => Number(product.stock || 0) <= 5).length;
+    const pendingOrders = orders.filter(order => ["Placed", "Packed"].includes(order.status)).length;
     return `
       <div class="stats admin-stats">
-        <div class="stat"><span>Total Products</span><strong>${summary.totals.products}</strong></div>
-        <div class="stat"><span>Total Orders</span><strong>${summary.totals.orders}</strong></div>
-        <div class="stat"><span>Total Users</span><strong>${summary.totals.users}</strong></div>
-        <div class="stat"><span>Seller Applications</span><strong>${summary.totals.sellerApplications}</strong></div>
+        ${adminStat("Total Products", summary.totals.products, "Catalog live")}
+        ${adminStat("Orders", summary.totals.orders, "All channels")}
+        ${adminStat("Revenue", money(revenue), "Recorded orders")}
+        ${adminStat("Seller Applications", summary.totals.sellerApplications, "Pipeline")}
+        ${adminStat("Low Stock", lowStock, "Needs attention")}
+        ${adminStat("Pending Orders", pendingOrders, "Action queue")}
       </div>
       <div class="admin-grid">
         <div class="table-card">
@@ -727,6 +784,10 @@ function adminTabContent(summary, products, orders, users, settings) {
     return settingsPanel(settings);
   }
   return `<div class="table-card table-scroll">${userTable(users)}</div>`;
+}
+
+function adminStat(label, value, helper) {
+  return `<div class="stat admin-stat"><span>${label}</span><strong>${value}</strong><small>${helper}</small></div>`;
 }
 
 function adminProductsPanel(products) {
@@ -1473,7 +1534,11 @@ async function route() {
     if (path === "success") return shell(`<div><div class="eyebrow">Success</div><h2>Order placed</h2></div>`, `<div class="message success">Thank you. Your order ${arg} has been placed successfully.</div><p><a class="btn" href="#/orders">View Orders</a></p>`);
     return renderHome();
   } catch (error) {
-    if (location.pathname === "/admin/dashboard" && /admin access|required|login/i.test(error.message)) {
+    if (location.pathname.startsWith("/admin") && /not admin|not authorized|access denied/i.test(error.message)) {
+      renderNotAuthorized("Not authorized");
+      return;
+    }
+    if (location.pathname.startsWith("/admin") && /admin access|required|login|session/i.test(error.message)) {
       clearSession();
       navigate("/admin");
       return;
@@ -1490,5 +1555,11 @@ function debounce(fn, wait) {
   };
 }
 
-saveCart();
-route();
+async function init() {
+  saveCart();
+  updateAdminVisibility(false);
+  await refreshVerifiedSession();
+  route();
+}
+
+init();

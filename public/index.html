@@ -7,7 +7,7 @@
     <meta name="description" content="Rukhsar Fashion - premium women's clothing ecommerce.">
     <title>Rukhsar Fashion</title>
     <link rel="preconnect" href="https://images.unsplash.com">
-    <link rel="stylesheet" href="/styles.css?v=10">
+    <link rel="stylesheet" href="/styles.css?v=11">
   </head>
   <body>
     <div class="announcement-bar">Royal festive edits now live - complimentary shipping on prepaid orders</div>
@@ -22,7 +22,7 @@
         <a href="#/seller">Sell With Us</a>
         <a href="#/orders">Orders</a>
         <a href="#/cart" class="cart-link">Cart <span id="cartCount">0</span></a>
-        <a href="/admin" class="admin-nav-link">Admin</a>
+        <a href="/admin/dashboard" class="admin-nav-link" hidden>Admin</a>
       </nav>
       <button class="menu-button" id="menuButton" aria-label="Open menu">Menu</button>
     </header>
@@ -33,7 +33,7 @@
       <a href="#/orders">Orders</a>
       <a href="#/cart">Cart</a>
       <a href="#/login">Login</a>
-      <a href="/admin" class="admin-nav-link">Admin</a>
+      <a href="/admin/dashboard" class="admin-nav-link" hidden>Admin</a>
     </nav>
     <main id="app" tabindex="-1"></main>
     <footer class="site-footer">
@@ -50,9 +50,9 @@
         <p id="footerTagline">Royal ethnic fashion with antique gold detail, refined silhouettes, and evening-ready elegance.</p>
         <div id="socialLinks" class="social-links"></div>
       </div>
-      <a href="/admin">Admin Access</a>
+      <a href="/admin/dashboard" class="admin-nav-link" hidden>Admin Access</a>
     </footer>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js?v=10" defer></script>
+    <script src="/app.js?v=11" defer></script>
   </body>
 </html>
