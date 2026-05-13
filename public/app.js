@@ -711,7 +711,7 @@ async function renderOrders() {
       ${orders.map(order => `
         <div class="order-row">
           <div><h3>${order.id}</h3><p>${new Date(order.createdAt).toLocaleString()} • ${order.items.length} item(s)</p></div>
-          <span class="pill">${order.status}</span>
+          <span class="pill">${orderStatusLabel(order.status)}</span>
           ${order.shipment?.trackingId ? `<p>Tracking ID: ${order.shipment.trackingId}<br>Shipment: ${order.shipment.status}</p>` : ""}
           <strong>${money(order.total)}</strong>
         </div>
@@ -838,7 +838,7 @@ function adminTabContent(summary, products, orders, users, settings) {
   if (state.adminTab === "dashboard") {
     const revenue = orders.reduce((sum, order) => sum + Number(order.total || 0), 0);
     const lowStock = products.filter(product => Number(product.stock || 0) <= 5).length;
-    const pendingOrders = orders.filter(order => ["Placed", "Packed"].includes(order.status)).length;
+    const pendingOrders = orders.filter(order => ["pending", "confirmed", "packed"].includes(String(order.status).toLowerCase())).length;
     return `
       <div class="stats admin-stats">
         ${adminStat("Total Products", summary.totals.products, "Catalog live")}
@@ -867,7 +867,12 @@ function adminTabContent(summary, products, orders, users, settings) {
     return productForm(state.editingProduct);
   }
   if (state.adminTab === "orders") {
-    return `<div class="table-card table-scroll">${orderTable(orders)}</div>`;
+    return `
+      <div class="admin-toolbar">
+        <button class="btn secondary" data-action="refresh-admin">Refresh Orders</button>
+      </div>
+      <div class="table-card table-scroll">${orders.length ? orderTable(orders) : `<div class="empty compact">No orders yet.</div>`}</div>
+    `;
   }
   if (state.adminTab === "applications") {
     return `<div class="table-card table-scroll">${applicationTable(summary.sellerApplications)}</div>`;
@@ -1147,21 +1152,61 @@ function compactOrderList(orders) {
   return orders.map(order => `
     <div class="order-row">
       <div><h3>${order.id}</h3><p>${order.customer.fullName} • ${new Date(order.createdAt).toLocaleDateString()}</p></div>
-      <span class="pill">${order.status}</span>
+      <span class="pill">${orderStatusLabel(order.status)}</span>
       <strong>${money(order.total)}</strong>
     </div>
   `).join("");
 }
 
+function orderStatusLabel(status) {
+  const labels = {
+    pending: "Pending",
+    confirmed: "Confirmed",
+    cancelled: "Cancelled",
+    packed: "Packed",
+    shipped: "Shipped",
+    delivered: "Delivered",
+    paid: "Paid",
+    cod: "COD"
+  };
+  return labels[String(status || "").toLowerCase()] || status || "Pending";
+}
+
+function orderItemSummary(order) {
+  return (order.items || []).map(item => `
+    <div class="order-item-line">
+      <strong>${item.name}</strong>
+      <span>Size ${item.size || "-"} / ${item.color || "-"} / Qty ${item.qty}</span>
+    </div>
+  `).join("");
+}
+
 function orderTable(orders) {
-  return `<table><thead><tr><th>Order</th><th>Customer</th><th>Total</th><th>Status</th></tr></thead><tbody>${orders.map(order => `
+  const statuses = [
+    ["pending", "Pending"],
+    ["confirmed", "Confirmed"],
+    ["cancelled", "Cancelled"],
+    ["packed", "Packed"],
+    ["shipped", "Shipped"],
+    ["delivered", "Delivered"]
+  ];
+  return `<table class="orders-table"><thead><tr><th>Order</th><th>Customer</th><th>Products</th><th>Payment</th><th>Total</th><th>Status</th><th>Actions</th></tr></thead><tbody>${orders.map(order => `
     <tr>
       <td>${order.id}<br>${new Date(order.createdAt).toLocaleDateString()}</td>
-      <td>${order.customer.fullName}<br>${order.address.phone}</td>
+      <td><strong>${order.customer.fullName || order.address.fullName || "Customer"}</strong><br>${order.address.phone || order.customer.phone || ""}<br><span class="muted">${[order.address.addressLine, order.address.city].filter(Boolean).join(", ")}</span></td>
+      <td>${orderItemSummary(order)}</td>
+      <td>${(order.payment?.method || "cod").toUpperCase()}<br><span class="pill">${orderStatusLabel(order.payment?.status)}</span></td>
       <td>${money(order.total)}</td>
       <td><select data-action="order-status" data-id="${order.id}">
-        ${["Placed", "Packed", "Shipped", "Delivered", "Cancelled"].map(status => `<option ${status === order.status ? "selected" : ""}>${status}</option>`).join("")}
+        ${statuses.map(([value, label]) => `<option value="${value}" ${value === String(order.status).toLowerCase() ? "selected" : ""}>${label}</option>`).join("")}
       </select></td>
+      <td><div class="order-actions">
+        <button class="btn secondary" data-action="set-order-status" data-id="${order.id}" data-status="confirmed">Approve</button>
+        <button class="btn ghost" data-action="set-order-status" data-id="${order.id}" data-status="packed">Packed</button>
+        <button class="btn ghost" data-action="set-order-status" data-id="${order.id}" data-status="shipped">Shipped</button>
+        <button class="btn ghost" data-action="set-order-status" data-id="${order.id}" data-status="delivered">Delivered</button>
+        <button class="btn danger" data-action="set-order-status" data-id="${order.id}" data-status="cancelled">Reject</button>
+      </div></td>
     </tr>`).join("")}</tbody></table>`;
 }
 
@@ -1222,6 +1267,11 @@ const handlers = {
       history.pushState({}, "", "/admin/dashboard");
     }
     renderAdmin();
+  },
+  "refresh-admin": async () => {
+    invalidateAdminCache();
+    toast("Refreshing admin data...");
+    await renderAdmin();
   },
   "settings-tab": (event, button) => {
     state.settingsTab = button.dataset.tab;
@@ -1300,6 +1350,17 @@ const handlers = {
     });
     invalidateAdminCache();
     toast("Order status updated.");
+    await renderAdmin();
+  },
+  "set-order-status": async (event, button) => {
+    button.disabled = true;
+    await api(`/api/admin/orders/${button.dataset.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status: button.dataset.status })
+    });
+    invalidateAdminCache();
+    toast("Order status updated.");
+    await renderAdmin();
   }
 };
 

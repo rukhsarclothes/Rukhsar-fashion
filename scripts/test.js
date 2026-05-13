@@ -296,9 +296,9 @@ async function run() {
   const updatedOrder = await request(`/api/admin/orders/${order.order.id}`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${admin.token}` },
-    body: JSON.stringify({ status: "Shipped" })
+    body: JSON.stringify({ status: "shipped" })
   });
-  assert.equal(updatedOrder.order.status, "Shipped");
+  assert.equal(updatedOrder.order.status, "shipped");
 
   const shipment = await request("/api/admin/shiprocket/sync", {
     method: "POST",

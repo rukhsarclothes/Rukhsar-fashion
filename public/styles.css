@@ -1012,6 +1012,34 @@ select option[value=""] {
   overflow-x: auto;
 }
 
+.orders-table {
+  min-width: 1080px;
+}
+
+.order-item-line {
+  display: grid;
+  gap: 0.18rem;
+  margin-bottom: 0.5rem;
+}
+
+.order-item-line span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+  min-width: 15rem;
+}
+
+.order-actions .btn {
+  min-height: 2.15rem;
+  padding: 0.42rem 0.72rem;
+  font-size: 0.78rem;
+}
+
 table {
   width: 100%;
   min-width: 720px;

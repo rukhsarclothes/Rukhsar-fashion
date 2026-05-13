@@ -892,6 +892,69 @@ async function supabaseInsertOrder(order) {
   return { ...order, createdAt: data.created_at, updatedAt: data.updated_at };
 }
 
+function toAppOrder(row, items = []) {
+  const orderItems = items.map(item => ({
+    productId: item.product_id,
+    name: item.product_name,
+    price: Number(item.price || 0),
+    qty: Number(item.quantity || 0),
+    size: item.size,
+    color: item.color || "",
+    image: item.image_url || ""
+  }));
+  return {
+    id: row.id,
+    userId: row.user_id,
+    customer: row.customer || {},
+    items: orderItems,
+    address: row.address || {},
+    total: Number(row.total || 0),
+    payment: row.payment || {},
+    shipment: row.shipment || {},
+    status: row.status || "pending",
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+async function supabaseOrders({ userId = "", admin = false, limit = 0 } = {}) {
+  requireSupabaseAdminWrite();
+  const client = supabaseWriteClient();
+  if (!client) throw new Error("Supabase is not configured.");
+  let query = client.from("orders").select("*").order("created_at", { ascending: false });
+  if (!admin) query = query.eq("user_id", userId);
+  if (limit) query = query.limit(limit);
+  const { data, error } = await query;
+  if (error) throw new Error(`Supabase orders read failed: ${error.message}`);
+  const orderIds = (data || []).map(order => order.id);
+  let items = [];
+  if (orderIds.length) {
+    const itemsResult = await client.from("order_items").select("*").in("order_id", orderIds).order("id", { ascending: true });
+    if (itemsResult.error) throw new Error(`Supabase order items read failed: ${itemsResult.error.message}`);
+    items = itemsResult.data || [];
+  }
+  const itemsByOrder = items.reduce((map, item) => {
+    if (!map.has(item.order_id)) map.set(item.order_id, []);
+    map.get(item.order_id).push(item);
+    return map;
+  }, new Map());
+  return (data || []).map(order => toAppOrder(order, itemsByOrder.get(order.id) || []));
+}
+
+async function supabaseUpdateOrderStatus(id, status) {
+  requireSupabaseAdminWrite();
+  const client = supabaseWriteClient();
+  if (!client) throw new Error("Supabase is not configured.");
+  const { data, error } = await client.from("orders").update({
+    status,
+    updated_at: new Date().toISOString()
+  }).eq("id", id).select("*").single();
+  if (error) throw new Error(`Supabase order status update failed: ${error.message}`);
+  const itemsResult = await client.from("order_items").select("*").eq("order_id", id).order("id", { ascending: true });
+  if (itemsResult.error) throw new Error(`Supabase order items read failed: ${itemsResult.error.message}`);
+  return toAppOrder(data, itemsResult.data || []);
+}
+
 async function supabaseSettings(localSettings) {
   const { data, error } = await supabase.from("store_settings").select("section, values").order("section");
   if (error) throw new Error(`Supabase settings read failed: ${error.message}`);
@@ -1437,6 +1500,10 @@ async function handleApi(req, res, url) {
     if (method === "GET" && pathname === "/api/orders") {
       const user = await requireAuth(req, res, db);
       if (!user) return;
+      if (supabaseEnabled()) {
+        const orders = await supabaseOrders({ userId: user.id, admin: user.role === "admin" });
+        return sendJson(res, 200, { orders });
+      }
       writeDb(db);
       const orders = user.role === "admin" ? db.orders : db.orders.filter(order => order.userId === user.id);
       return sendJson(res, 200, { orders });
@@ -1509,7 +1576,7 @@ async function handleApi(req, res, url) {
         total: orderItems.reduce((sum, item) => sum + item.price * item.qty, 0),
         payment: {
           method: clean(body.paymentMethod) || "cod",
-          status: clean(body.paymentStatus) || (clean(body.paymentMethod) === "razorpay" ? "Pending" : "COD"),
+          status: clean(body.paymentStatus) || "pending",
           razorpayOrderId: clean(body.razorpay_order_id),
           razorpayPaymentId: clean(body.razorpay_payment_id)
         },
@@ -1517,10 +1584,10 @@ async function handleApi(req, res, url) {
           provider: "",
           trackingId: "",
           awb: "",
-          status: "Pending",
+          status: "pending",
           labelUrl: ""
         },
-        status: "Placed",
+        status: "pending",
         createdAt: new Date().toISOString()
       };
       createLocalShipment(db, order);
@@ -1617,6 +1684,7 @@ async function handleApi(req, res, url) {
           if (productsResult.error) throw new Error(`Supabase product count failed: ${productsResult.error.message}`);
           if (ordersResult.error) throw new Error(`Supabase order count failed: ${ordersResult.error.message}`);
           if (applicationsResult.error) throw new Error(`Supabase seller applications read failed: ${applicationsResult.error.message}`);
+          const recentOrders = await supabaseOrders({ admin: true, limit: 5 });
           return sendJson(res, 200, {
             totals: {
               products: productsResult.count || 0,
@@ -1624,7 +1692,7 @@ async function handleApi(req, res, url) {
               users: db.users.filter(user => user.role === "customer").length,
               sellerApplications: applicationsResult.data.length
             },
-            recentOrders: db.orders.slice(0, 5),
+            recentOrders,
             sellerApplications: applicationsResult.data.map(toAppSellerApplication)
           });
         }
@@ -1774,11 +1842,16 @@ async function handleApi(req, res, url) {
       if (method === "PATCH" && pathname.startsWith("/api/admin/orders/")) {
         const id = decodeURIComponent(pathname.split("/").pop());
         const body = await parseJson(req);
+        const status = clean(body.status).toLowerCase();
+        const allowed = ["pending", "confirmed", "cancelled", "packed", "shipped", "delivered"];
+        if (!allowed.includes(status)) return sendError(res, 400, "Invalid order status.");
+        if (supabaseEnabled()) {
+          const order = await supabaseUpdateOrderStatus(id, status);
+          return sendJson(res, 200, { order });
+        }
         const order = db.orders.find(item => item.id === id);
-        const allowed = ["Placed", "Packed", "Shipped", "Delivered", "Cancelled"];
         if (!order) return sendError(res, 404, "Order not found.");
-        if (!allowed.includes(body.status)) return sendError(res, 400, "Invalid order status.");
-        order.status = body.status;
+        order.status = status;
         order.updatedAt = new Date().toISOString();
         writeDb(db);
         return sendJson(res, 200, { order });
