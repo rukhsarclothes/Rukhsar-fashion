@@ -1457,10 +1457,10 @@ async function handleApi(req, res, url) {
       const orderItems = [];
       for (const item of items) {
         const product = supabaseEnabled()
-          ? await supabaseProductById(item.productId, false)
+          ? await supabaseProductById(item.productId, true)
           : db.products.find(productItem => productItem.id === item.productId);
         const qty = Number(item.qty);
-        if (!product || !Number.isFinite(qty) || qty < 1) {
+        if (!product || product.status === "inactive" || !Number.isFinite(qty) || qty < 1) {
           errors.push("Invalid cart item.");
           continue;
         }
