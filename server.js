@@ -26,6 +26,7 @@ const ADMIN_PASSWORD = cleanEnv(process.env.ADMIN_PASSWORD);
 const SESSION_SECRET = process.env.SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY || "rukhsar-local-dev-secret";
 const DISABLE_SUPABASE = process.env.DISABLE_SUPABASE === "1";
 const DISABLE_RAZORPAY = process.env.DISABLE_RAZORPAY === "1";
+const PUBLIC_SUPABASE_TIMEOUT_MS = Number(process.env.PUBLIC_SUPABASE_TIMEOUT_MS || (process.env.VERCEL ? 3500 : 900));
 const supabaseConfigErrors = [];
 const supabase = createSupabaseClient("anon", SUPABASE_URL, SUPABASE_ANON_KEY);
 const supabaseAdmin = createSupabaseClient("service", SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) || supabase;
@@ -1252,7 +1253,7 @@ async function handleApi(req, res, url) {
     if (method === "GET" && pathname === "/api/settings") {
       if (supabaseEnabled()) {
         try {
-          const settings = await withTimeout(supabaseSettings(db.settings), 900, "Supabase settings read");
+          const settings = await withTimeout(supabaseSettings(db.settings), PUBLIC_SUPABASE_TIMEOUT_MS, "Supabase settings read");
           return sendJson(res, 200, { settings: sanitizeSettings(settings) });
         } catch (error) {
           console.warn("Supabase settings read failed, serving local fallback:", error.message);
@@ -1285,7 +1286,7 @@ async function handleApi(req, res, url) {
       const category = clean(url.searchParams.get("category"));
       if (supabaseEnabled()) {
         try {
-          const payload = await withTimeout(supabaseProducts({ q, category, includeInactive: false }), 900, "Supabase products read");
+          const payload = await withTimeout(supabaseProducts({ q, category, includeInactive: false }), PUBLIC_SUPABASE_TIMEOUT_MS, "Supabase products read");
           return sendJson(res, 200, payload);
         } catch (error) {
           console.warn("Supabase products read failed, serving local fallback:", error.message);
@@ -1299,7 +1300,7 @@ async function handleApi(req, res, url) {
       const id = decodeURIComponent(pathname.split("/").pop());
       if (supabaseEnabled()) {
         try {
-          const product = await withTimeout(supabaseProductById(id, false), 900, "Supabase product detail read");
+          const product = await withTimeout(supabaseProductById(id, false), PUBLIC_SUPABASE_TIMEOUT_MS, "Supabase product detail read");
           return product ? sendJson(res, 200, { product }) : sendError(res, 404, "Product not found.");
         } catch (error) {
           console.warn("Supabase product detail read failed, serving local fallback:", error.message);
