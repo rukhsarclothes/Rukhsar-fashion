@@ -13,6 +13,8 @@ const state = {
   settings: null,
   settingsTab: "general",
   authConfig: null,
+  paymentConfig: null,
+  productCache: new Map(),
   adminCache: null,
   adminVerifiedAt: 0
 };
@@ -365,6 +367,10 @@ function invalidateAdminCache() {
   state.adminCache = null;
 }
 
+function invalidateProductCache() {
+  state.productCache.clear();
+}
+
 async function refreshVerifiedSession() {
   if (!hasValidToken()) {
     updateAdminVisibility(false);
@@ -378,8 +384,18 @@ async function refreshVerifiedSession() {
   }
 }
 
-async function loadProducts(params = "") {
+async function loadProducts(params = "", options = {}) {
+  const cacheKey = params || "all";
+  if (!options.force && state.productCache.has(cacheKey)) {
+    const cached = state.productCache.get(cacheKey);
+    state.products = cached.products;
+    state.categories = cached.categories;
+    return cached;
+  }
   const payload = await api(`/api/products${params}`);
+  payload.products = Array.isArray(payload.products) ? payload.products : [];
+  payload.categories = Array.isArray(payload.categories) ? payload.categories : [];
+  state.productCache.set(cacheKey, payload);
   state.products = payload.products;
   state.categories = payload.categories;
   return payload;
@@ -390,6 +406,11 @@ async function loadSettings(admin = false) {
   state.settings = payload.settings;
   applyPublicSettings(payload.settings);
   return payload.settings;
+}
+
+async function loadPaymentConfig() {
+  if (!state.paymentConfig) state.paymentConfig = await api("/api/payment-config");
+  return state.paymentConfig;
 }
 
 function applyPublicSettings(settings) {
@@ -416,11 +437,24 @@ function shell(title, body) {
   app.focus({ preventScroll: true });
 }
 
+function renderLoading(title = "Loading") {
+  shell(`<div><div class="eyebrow">Rukhsar Fashion</div><h2>${title}</h2></div>`, `
+    <div class="grid product-grid" aria-live="polite">
+      ${Array.from({ length: 4 }, () => `
+        <article class="product-card skeleton-card">
+          <div class="skeleton-media"></div>
+          <div class="product-body skeleton-lines"><span></span><span></span><span></span></div>
+        </article>
+      `).join("")}
+    </div>
+  `);
+}
+
 function productCard(product) {
   const discount = productDiscountPercent(product);
   return `
     <article class="product-card">
-      <button class="wishlist-btn" type="button" aria-label="Add ${product.name} to wishlist">♡</button>
+      <button class="wishlist-btn" type="button" aria-label="Add ${product.name} to wishlist">&hearts;</button>
       <a class="product-image-link" href="#/product/${product.id}">
         ${imageTag(productImage(product), product.name, "", 'loading="lazy"')}
       </a>
@@ -459,7 +493,7 @@ async function renderHome() {
         <p>${heroSubtitle}</p>
         <div class="actions">
           <a class="btn" href="#/products">Explore Collection</a>
-          <a class="btn champagne" href="/collections/chikankari">Signature Chikankari</a>
+          <a class="btn champagne" href="#/collections/chikankari">Signature Chikankari</a>
         </div>
       </div>
     </section>
@@ -485,7 +519,7 @@ async function renderHome() {
         <h2>Chikankari Collection</h2>
         <p>${chikankariCopy}</p>
       </div>
-      <a class="btn" href="/collections/chikankari">Explore Chikankari</a>
+      <a class="btn" href="#/collections/chikankari">Explore Chikankari</a>
     </section>
     <section class="page">
       <div class="grid product-grid">${chikankari.map(productCard).join("")}</div>
@@ -495,6 +529,7 @@ async function renderHome() {
 
 async function renderProducts(initialCategory = "") {
   const params = initialCategory ? `?category=${encodeURIComponent(initialCategory)}` : "";
+  renderLoading(initialCategory === "chikankari" ? "Chikankari Collection" : "Women's collection");
   await loadProducts(params);
   const heading = initialCategory === "chikankari" ? "Chikankari Collection" : "Women's collection";
   const copy = initialCategory === "chikankari" ? "<p>Timeless hand-embroidered elegance for every occasion.</p>" : "";
@@ -604,8 +639,13 @@ async function renderCheckout() {
     return;
   }
   if (!state.settings) await loadSettings();
+  const paymentConfig = await loadPaymentConfig().catch(() => ({ razorpayEnabled: false }));
   const total = state.cart.reduce((sum, item) => sum + discountPrice(item.product) * item.qty, 0);
   const payment = state.settings?.payment || {};
+  const razorpayAvailable = Boolean(paymentConfig.razorpayEnabled || payment.razorpayEnabled);
+  const razorpayWarning = !paymentConfig.razorpayEnabled && payment.razorpayEnabled
+    ? `<div class="message error compact">Online payment is enabled in settings, but Razorpay keys are missing on the server. COD is still available.</div>`
+    : "";
   shell(`<div><div class="eyebrow">Checkout</div><h2>Delivery details</h2></div>`, state.cart.length ? `
     <div class="checkout-layout">
       <form data-form="checkout" class="panel form-grid">
@@ -616,8 +656,9 @@ async function renderCheckout() {
         <div class="field"><label>Order note</label><input name="note"></div>
         <div class="field"><label>Payment method</label><select name="paymentMethod">
           ${payment.codEnabled !== false ? `<option value="cod">Cash on Delivery</option>` : ""}
-          ${payment.razorpayEnabled ? `<option value="razorpay">Razorpay ${payment.paymentMode === "test" ? "(Test)" : ""}</option>` : ""}
+          ${razorpayAvailable ? `<option value="razorpay" ${paymentConfig.razorpayEnabled ? "" : "disabled"}>Razorpay / UPI / Card</option>` : ""}
         </select></div>
+        ${razorpayWarning}
         <button class="btn" type="submit">Place Order</button>
       </form>
       <aside class="panel">
@@ -634,10 +675,13 @@ function renderLogin(mode = "login") {
   shell(`<div><div class="eyebrow">Account</div><h2>${isSignup ? "Create account" : "Welcome back"}</h2></div>`, `
     <form data-form="${isSignup ? "signup" : "login"}" class="panel form-grid">
       ${isSignup ? `<div class="field"><label>Full name</label><input name="fullName" required></div>` : ""}
+      ${isSignup ? `<div class="field"><label>Phone number</label><input name="phone" inputmode="tel" required></div>` : ""}
+      ${isSignup ? `<div class="field"><label>City / state</label><input name="city" required></div>` : ""}
+      ${isSignup ? `<div class="field"><label>Pincode</label><input name="pincode" inputmode="numeric" required></div>` : ""}
       <div class="field"><label>Email</label><input type="email" name="email" required></div>
       <div class="field"><label>Password</label><input type="password" name="password" required minlength="6"></div>
       <button class="btn" type="submit">${isSignup ? "Create Account" : "Login"}</button>
-      <button class="btn ghost" type="button" data-action="oauth-login" data-role="customer">Continue with Google</button>
+      <button class="btn ghost google-btn" type="button" data-action="oauth-login" data-role="customer"><span class="google-mark">G</span>Continue with Google</button>
       <a href="#/${isSignup ? "login" : "signup"}">${isSignup ? "Already have an account?" : "New here? Create an account"}</a>
     </form>
   `);
@@ -689,7 +733,7 @@ function renderAdminLogin() {
         <div class="field"><label>Email</label><input type="email" name="email" value="admin@rukhsarfashion.com" required></div>
         <div class="field"><label>Password</label><input type="password" name="password" required></div>
         <button class="btn" type="submit">Login to Dashboard</button>
-        <button class="btn ghost" type="button" data-action="oauth-login" data-role="admin">Continue with Google as Admin</button>
+        <button class="btn ghost google-btn" type="button" data-action="oauth-login" data-role="admin"><span class="google-mark">G</span>Continue with Google as Admin</button>
       </form>
     </section>
   `;
@@ -1244,6 +1288,7 @@ const handlers = {
   "delete-product": async (event, button) => {
     await api(`/api/admin/products/${button.dataset.id}`, { method: "DELETE" });
     invalidateAdminCache();
+    invalidateProductCache();
     state.deleteProductId = null;
     toast("Product deleted.");
     renderAdmin();
@@ -1427,6 +1472,65 @@ async function settingsFormPayload(form) {
   return payload;
 }
 
+function ensureRazorpayCheckout() {
+  if (window.Razorpay) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[src="https://checkout.razorpay.com/v1/checkout.js"]');
+    if (existing) {
+      existing.addEventListener("load", resolve, { once: true });
+      existing.addEventListener("error", () => reject(new Error("Razorpay checkout could not be loaded.")), { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://checkout.razorpay.com/v1/checkout.js";
+    script.onload = resolve;
+    script.onerror = () => reject(new Error("Razorpay checkout could not be loaded."));
+    document.head.appendChild(script);
+  });
+}
+
+async function startRazorpayPayment({ amountPaise, receipt, customer }) {
+  await ensureRazorpayCheckout();
+  const order = await api("/api/create-order", {
+    method: "POST",
+    body: JSON.stringify({ amount: amountPaise, currency: "INR", receipt })
+  });
+  return new Promise((resolve, reject) => {
+    const checkout = new window.Razorpay({
+      key: order.key_id,
+      amount: order.amount,
+      currency: order.currency,
+      name: "Rukhsar Fashion",
+      description: "Secure checkout",
+      order_id: order.order_id,
+      prefill: {
+        name: customer.fullName || state.user?.fullName || "",
+        email: state.user?.email || "",
+        contact: customer.phone || ""
+      },
+      theme: { color: "#110713" },
+      handler: async response => {
+        try {
+          const verified = await api("/api/verify-payment", {
+            method: "POST",
+            body: JSON.stringify(response)
+          });
+          resolve({ ...response, verified });
+        } catch (error) {
+          reject(error);
+        }
+      },
+      modal: {
+        ondismiss: () => reject(new Error("Payment cancelled."))
+      }
+    });
+    checkout.on("payment.failed", event => {
+      reject(new Error(event.error?.description || "Payment failed. Please try again."));
+    });
+    checkout.open();
+  });
+}
+
 const formHandlers = {
   "add-cart": async form => {
     const productId = new FormData(form).get("productId");
@@ -1456,12 +1560,9 @@ const formHandlers = {
     const payload = Object.fromEntries(new FormData(form));
     try {
       const session = await api("/api/auth/signup", { method: "POST", body: JSON.stringify(payload) });
-      if (session.token) {
-        saveSession(session);
-        location.hash = "#/";
-      } else {
-        showFormMessage(form, session.message || "Please check your email to confirm your account.", "success");
-      }
+      saveSession(session);
+      toast("Account created. Welcome to Rukhsar Fashion.");
+      location.hash = "#/";
     } finally {
       setButtonLoading(form, false);
     }
@@ -1483,18 +1584,34 @@ const formHandlers = {
     }
   },
   checkout: async form => {
+    setButtonLoading(form, true, "Processing...");
     const address = Object.fromEntries(new FormData(form));
     const paymentMethod = new FormData(form).get("paymentMethod");
     const items = state.cart.map(item => ({ productId: item.productId, qty: item.qty, size: item.size, color: item.color }));
     const total = state.cart.reduce((sum, item) => sum + discountPrice(item.product) * item.qty, 0);
-    if (paymentMethod === "razorpay") {
-      await api("/api/payments/razorpay/order", { method: "POST", body: JSON.stringify({ amount: total, receipt: `cart-${Date.now()}` }) });
-      toast("Razorpay order created. Complete payment in the configured checkout.");
+    const payload = { address, items, paymentMethod };
+    try {
+      if (paymentMethod === "razorpay") {
+        const amountPaise = Math.round(total * 100);
+        const payment = await startRazorpayPayment({
+          amountPaise,
+          receipt: `cart-${Date.now()}`,
+          customer: address
+        });
+        payload.paymentStatus = "Paid";
+        payload.razorpay_order_id = payment.razorpay_order_id;
+        payload.razorpay_payment_id = payment.razorpay_payment_id;
+      }
+      const { order } = await api("/api/orders", { method: "POST", body: JSON.stringify(payload) });
+      state.cart = [];
+      saveCart();
+      location.hash = `#/success/${order.id}`;
+    } catch (error) {
+      showFormMessage(form, error.message, "error");
+      throw error;
+    } finally {
+      setButtonLoading(form, false);
     }
-    const { order } = await api("/api/orders", { method: "POST", body: JSON.stringify({ address, items, paymentMethod }) });
-    state.cart = [];
-    saveCart();
-    location.hash = `#/success/${order.id}`;
   },
   seller: async form => {
     const payload = Object.fromEntries(new FormData(form));
@@ -1521,6 +1638,7 @@ const formHandlers = {
       });
       await api(path, { method, body: JSON.stringify(payload) });
       invalidateAdminCache();
+      invalidateProductCache();
       toast(id ? "Product updated." : "Product added.");
       state.editingProduct = null;
       state.adminTab = "products";

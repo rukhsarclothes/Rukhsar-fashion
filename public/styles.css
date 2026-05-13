@@ -411,6 +411,21 @@ p {
   color: var(--cream);
 }
 
+.google-btn {
+  gap: 0.65rem;
+}
+
+.google-mark {
+  display: inline-grid;
+  width: 1.42rem;
+  height: 1.42rem;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--cream);
+  color: #1a1110;
+  font-weight: 950;
+}
+
 .section-head {
   display: flex;
   align-items: end;
@@ -875,6 +890,37 @@ select option[value=""] {
   background: rgba(215, 181, 109, 0.14);
   color: var(--gold-bright);
   font-weight: 850;
+}
+
+.message.compact {
+  padding: 0.75rem 0.9rem;
+  font-size: 0.9rem;
+}
+
+.skeleton-card {
+  pointer-events: none;
+}
+
+.skeleton-media,
+.skeleton-lines span {
+  display: block;
+  border-radius: 14px;
+  background: linear-gradient(90deg, rgba(255, 244, 220, 0.08), rgba(215, 181, 109, 0.16), rgba(255, 244, 220, 0.08));
+  background-size: 220% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+.skeleton-media {
+  aspect-ratio: 4 / 5;
+}
+
+.skeleton-lines {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.skeleton-lines span {
+  height: 0.85rem;
 }
 
 .message.success {
@@ -1720,17 +1766,10 @@ body.admin-mode .skeleton-lines span:nth-child(3) {
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  .hero {
-    animation: heroZoom 16s ease-in-out infinite alternate;
-  }
-
-  .product-card,
+  .hero-content,
   .collection-band,
-  .panel,
-  .table-card,
-  .stat,
   .trust-strip {
-    animation: fadeUp 560ms ease both;
+    animation: fadeUp 460ms ease both;
   }
 
   .btn:active,

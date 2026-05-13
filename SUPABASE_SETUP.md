@@ -54,7 +54,12 @@ If you already ran the schema before Supabase Auth support was added, run [supab
 Enable email/password auth:
 1. Supabase Dashboard > Authentication > Providers.
 2. Enable Email.
-3. Decide whether email confirmation is required for your store.
+3. Turn off mandatory confirmation for this store:
+   - Supabase Dashboard > Authentication > Providers > Email.
+   - Disable `Confirm email`.
+   - Save changes.
+
+The server-side signup flow also creates Supabase users with `email_confirm = true` when `SUPABASE_SERVICE_ROLE_KEY` is configured, so customers can create an account and shop immediately without seeing the default Supabase confirmation email.
 
 Enable Google OAuth:
 1. Supabase Dashboard > Authentication > Providers > Google.
@@ -64,15 +69,20 @@ Enable Google OAuth:
 Configure Supabase redirect URLs:
 - Site URL: `https://rukhsar-fashion.vercel.app`
 - Redirect URLs:
-  - `http://localhost:3000/**`
-  - `https://rukhsar-fashion.vercel.app/**`
-  - any Vercel preview wildcard you use, for example `https://*-rukhsarclothes*.vercel.app/**`
+  - `http://localhost:3000/auth/callback`
+  - `https://rukhsar-fashion.vercel.app/auth/callback`
+  - `https://www.rukhsar.fashion/auth/callback`
+  - `https://rukhsar.fashion/auth/callback`
+  - any Vercel preview callback you use, for example `https://your-preview-url.vercel.app/auth/callback`
 
 The app uses these callback URLs:
-- Local user/admin Google callback: `http://localhost:3000/auth/callback?role=customer`
-- Local admin Google callback: `http://localhost:3000/auth/callback?role=admin`
-- Production user/admin Google callback: `https://rukhsar-fashion.vercel.app/auth/callback?role=customer`
-- Production admin Google callback: `https://rukhsar-fashion.vercel.app/auth/callback?role=admin`
+- Local user/admin Google callback: `http://localhost:3000/auth/callback`
+- Production user/admin Google callback: `https://rukhsar-fashion.vercel.app/auth/callback`
+- Custom domain Google callbacks:
+  - `https://www.rukhsar.fashion/auth/callback`
+  - `https://rukhsar.fashion/auth/callback`
+
+The app adds the customer/admin role in the OAuth state parameter, so the redirect URL itself should stay as `/auth/callback`.
 
 ## Add an Admin User
 
@@ -118,6 +128,8 @@ If a Google account is not listed as admin, `/admin/dashboard` will reject it wi
 
 The SQL enables Row Level Security on all public tables.
 
+If checkout or admin APIs show `infinite recursion detected in policy for relation admin_users`, run [supabase/fix-rls-recursion.sql](supabase/fix-rls-recursion.sql). It replaces direct recursive admin table checks with a security-definer admin check and recreates the product, profile, role, order, seller application, settings, admin, and storage policies.
+
 Current policy model:
 - Public users can read only active products.
 - Public users can insert seller applications.
@@ -150,7 +162,7 @@ Then open:
 ```text
 http://localhost:3000/api/health
 http://localhost:3000/api/products
-http://localhost:3000/collections/chikankari
+http://localhost:3000/#/collections/chikankari
 ```
 
 `/api/health` should include:

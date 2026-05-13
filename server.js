@@ -4,6 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 const os = require("os");
 const { createClient } = require("@supabase/supabase-js");
+const Razorpay = require("razorpay");
 
 loadEnvFile(".env.local");
 loadEnvFile(".env");
@@ -18,13 +19,19 @@ const MAX_JSON_BYTES = 25 * 1024 * 1024;
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const RAZORPAY_KEY_ID = cleanEnv(process.env.RAZORPAY_KEY_ID);
+const RAZORPAY_KEY_SECRET = cleanEnv(process.env.RAZORPAY_KEY_SECRET);
 const ADMIN_EMAIL = cleanEnv(process.env.ADMIN_EMAIL).toLowerCase();
 const ADMIN_PASSWORD = cleanEnv(process.env.ADMIN_PASSWORD);
 const SESSION_SECRET = process.env.SESSION_SECRET || SUPABASE_SERVICE_ROLE_KEY || "rukhsar-local-dev-secret";
 const DISABLE_SUPABASE = process.env.DISABLE_SUPABASE === "1";
+const DISABLE_RAZORPAY = process.env.DISABLE_RAZORPAY === "1";
 const supabaseConfigErrors = [];
 const supabase = createSupabaseClient("anon", SUPABASE_URL, SUPABASE_ANON_KEY);
 const supabaseAdmin = createSupabaseClient("service", SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) || supabase;
+const razorpay = !DISABLE_RAZORPAY && RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET
+  ? new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_KEY_SECRET })
+  : null;
 
 function cleanEnv(value) {
   return String(value || "").trim();
@@ -450,6 +457,93 @@ function verifyHmacSignature(payload, signature, secret) {
   }
 }
 
+function razorpayConfigured() {
+  return Boolean(!DISABLE_RAZORPAY && razorpay && RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET);
+}
+
+async function createRazorpayOrder(body) {
+  const amount = Number(body.amount);
+  const currency = clean(body.currency) || "INR";
+  const receipt = clean(body.receipt) || uid("receipt");
+  if (!Number.isInteger(amount) || amount < 100) {
+    const error = new Error("Amount must be at least 100 paise.");
+    error.statusCode = 400;
+    throw error;
+  }
+  if (DISABLE_RAZORPAY) {
+    return {
+      order_id: uid("order_test"),
+      amount,
+      currency,
+      receipt,
+      key_id: RAZORPAY_KEY_ID || "rzp_test_disabled"
+    };
+  }
+  if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) {
+    const error = new Error("Razorpay credentials are not configured.");
+    error.statusCode = 401;
+    throw error;
+  }
+  if (!razorpay) {
+    const error = new Error("Razorpay client is not available.");
+    error.statusCode = 500;
+    throw error;
+  }
+  try {
+    const order = await razorpay.orders.create({
+      amount,
+      currency,
+      receipt: receipt.slice(0, 40),
+      payment_capture: 1
+    });
+    return {
+      order_id: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      receipt: order.receipt,
+      key_id: RAZORPAY_KEY_ID
+    };
+  } catch (error) {
+    const statusCode = error.statusCode === 401 ? 401 : 500;
+    const wrapped = new Error(error.error?.description || error.message || "Razorpay order creation failed.");
+    wrapped.statusCode = statusCode;
+    throw wrapped;
+  }
+}
+
+function verifyRazorpayPayment(body, secret = RAZORPAY_KEY_SECRET) {
+  const orderId = clean(body.razorpay_order_id);
+  const paymentId = clean(body.razorpay_payment_id);
+  const signature = clean(body.razorpay_signature);
+  if (!orderId || !paymentId || !signature) {
+    const error = new Error("Payment id, order id, and signature are required.");
+    error.statusCode = 400;
+    throw error;
+  }
+  const ok = verifyHmacSignature(`${orderId}|${paymentId}`, signature, secret);
+  if (!ok) {
+    const error = new Error("Invalid payment signature.");
+    error.statusCode = 400;
+    throw error;
+  }
+  return { orderId, paymentId };
+}
+
+function razorpayOrderResponse(paymentOrder) {
+  return {
+    ...paymentOrder,
+    order: {
+      id: paymentOrder.order_id,
+      provider: "razorpay",
+      amount: paymentOrder.amount,
+      currency: paymentOrder.currency,
+      receipt: paymentOrder.receipt,
+      status: "created"
+    },
+    keyId: paymentOrder.key_id
+  };
+}
+
 function createLocalShipment(db, order) {
   const settings = db.settings.shipping;
   if (!settings.shiprocketEnabled || !settings.autoShipmentCreation) return null;
@@ -472,12 +566,15 @@ function createLocalShipment(db, order) {
   return order.shipment;
 }
 
-function createUserRecord({ fullName, email, password, role = "customer" }) {
+function createUserRecord({ fullName, email, password, phone = "", city = "", pincode = "", role = "customer" }) {
   return {
     id: uid("usr"),
     fullName: clean(fullName),
     email: String(email).trim().toLowerCase(),
     passwordHash: hashPassword(password),
+    phone: clean(phone),
+    city: clean(city),
+    pincode: clean(pincode),
     role,
     createdAt: new Date().toISOString()
   };
@@ -489,6 +586,9 @@ function publicUser(user) {
     id: user.id,
     fullName: user.fullName,
     email: user.email,
+    phone: user.phone || "",
+    city: user.city || "",
+    pincode: user.pincode || "",
     role: user.role,
     createdAt: user.createdAt
   };
@@ -500,6 +600,9 @@ function publicSupabaseUser(authUser, role = "customer") {
     id: authUser.id,
     fullName: name,
     email: authUser.email,
+    phone: authUser.user_metadata?.phone || "",
+    city: authUser.user_metadata?.city || "",
+    pincode: authUser.user_metadata?.pincode || "",
     role,
     createdAt: authUser.created_at
   };
@@ -574,6 +677,14 @@ function sendJson(res, status, payload) {
 
 function sendError(res, status, message) {
   sendJson(res, status, { error: message });
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 function isEmail(value) {
@@ -929,13 +1040,41 @@ async function supabasePasswordAuth(email, password, mode = "login") {
   const { data, error } = await authCall;
   if (error) throw new Error(error.message);
   if (!data.session?.access_token) {
-    const err = new Error("Please confirm your email, then login again.");
+    const err = new Error("Signup could not start a session. Please contact support.");
     err.statusCode = 202;
     throw err;
   }
   const role = await supabaseRoleForUser(data.user);
   await supabaseEnsureProfile(data.user, role);
   return { token: data.session.access_token, user: publicSupabaseUser(data.user, role), provider: "supabase" };
+}
+
+async function supabaseInstantSignup({ fullName, email, password, phone = "", city = "", pincode = "" }) {
+  if (!supabase) throw new Error("Supabase Auth is not configured.");
+  const normalizedEmail = clean(email).toLowerCase();
+  if (supabaseAdmin?.auth?.admin) {
+    const existing = await supabaseFindUserByEmail(normalizedEmail);
+    if (existing) {
+      const err = new Error("Email is already registered.");
+      err.statusCode = 400;
+      throw err;
+    }
+    const { data, error } = await supabaseAdmin.auth.admin.createUser({
+      email: normalizedEmail,
+      password,
+      email_confirm: true,
+      user_metadata: {
+        full_name: clean(fullName),
+        phone: clean(phone),
+        city: clean(city),
+        pincode: clean(pincode)
+      }
+    });
+    if (error) throw new Error(error.message);
+    await supabaseEnsureProfile(data.user, "customer");
+    return supabasePasswordAuth(normalizedEmail, password, "login");
+  }
+  return supabasePasswordAuth(normalizedEmail, password, "signup");
 }
 
 function normalizeProduct(product) {
@@ -970,6 +1109,37 @@ function normalizeProduct(product) {
     changed = true;
   }
   return changed;
+}
+
+function safePublicMedia(value) {
+  const media = clean(value);
+  if (!media) return "";
+  if (media.length > 50000) return "";
+  return media;
+}
+
+function safePublicProduct(product) {
+  const copy = { ...product };
+  copy.thumbnail = safePublicMedia(copy.thumbnail);
+  copy.mainImage = safePublicMedia(copy.mainImage);
+  copy.images = listFromValue(copy.images).map(safePublicMedia).filter(Boolean);
+  copy.galleryImages = listFromValue(copy.galleryImages).map(safePublicMedia).filter(Boolean);
+  return copy;
+}
+
+function localProductsPayload(db, { q = "", category = "" } = {}) {
+  let products = db.products;
+  products.forEach(normalizeProduct);
+  products = products.filter(product => product.status !== "inactive");
+  if (q) {
+    products = products.filter(product =>
+      [product.name, product.category, product.description].join(" ").toLowerCase().includes(q)
+    );
+  }
+  if (category) {
+    products = products.filter(product => product.category === category);
+  }
+  return { products: products.map(safePublicProduct), categories: [...new Set(db.products.map(item => item.category))] };
 }
 
 function productPayload(body, existing = {}) {
@@ -1081,8 +1251,13 @@ async function handleApi(req, res, url) {
 
     if (method === "GET" && pathname === "/api/settings") {
       if (supabaseEnabled()) {
-        const settings = await supabaseSettings(db.settings);
-        return sendJson(res, 200, { settings: sanitizeSettings(settings) });
+        try {
+          const settings = await withTimeout(supabaseSettings(db.settings), 900, "Supabase settings read");
+          return sendJson(res, 200, { settings: sanitizeSettings(settings) });
+        } catch (error) {
+          console.warn("Supabase settings read failed, serving local fallback:", error.message);
+          return sendJson(res, 200, { settings: sanitizeSettings(db.settings), source: "local-fallback" });
+        }
       }
       return sendJson(res, 200, { settings: sanitizeSettings(db.settings) });
     }
@@ -1097,52 +1272,63 @@ async function handleApi(req, res, url) {
       });
     }
 
+    if (method === "GET" && pathname === "/api/payment-config") {
+      return sendJson(res, 200, {
+        razorpayEnabled: razorpayConfigured(),
+        razorpayKeyId: RAZORPAY_KEY_ID,
+        currency: db.settings.general.currency || "INR"
+      });
+    }
+
     if (method === "GET" && pathname === "/api/products") {
       const q = clean(url.searchParams.get("q")).toLowerCase();
       const category = clean(url.searchParams.get("category"));
       if (supabaseEnabled()) {
-        const payload = await supabaseProducts({ q, category, includeInactive: false });
-        return sendJson(res, 200, payload);
+        try {
+          const payload = await withTimeout(supabaseProducts({ q, category, includeInactive: false }), 900, "Supabase products read");
+          return sendJson(res, 200, payload);
+        } catch (error) {
+          console.warn("Supabase products read failed, serving local fallback:", error.message);
+          return sendJson(res, 200, { ...localProductsPayload(db, { q, category }), source: "local-fallback" });
+        }
       }
-      let products = db.products;
-      products.forEach(normalizeProduct);
-      products = products.filter(product => product.status !== "inactive");
-      if (q) {
-        products = products.filter(product =>
-          [product.name, product.category, product.description].join(" ").toLowerCase().includes(q)
-        );
-      }
-      if (category) {
-        products = products.filter(product => product.category === category);
-      }
-      return sendJson(res, 200, { products, categories: [...new Set(db.products.map(item => item.category))] });
+      return sendJson(res, 200, localProductsPayload(db, { q, category }));
     }
 
     if (method === "GET" && pathname.startsWith("/api/products/")) {
       const id = decodeURIComponent(pathname.split("/").pop());
       if (supabaseEnabled()) {
-        const product = await supabaseProductById(id, false);
-        return product ? sendJson(res, 200, { product }) : sendError(res, 404, "Product not found.");
+        try {
+          const product = await withTimeout(supabaseProductById(id, false), 900, "Supabase product detail read");
+          return product ? sendJson(res, 200, { product }) : sendError(res, 404, "Product not found.");
+        } catch (error) {
+          console.warn("Supabase product detail read failed, serving local fallback:", error.message);
+        }
       }
       const product = db.products.find(item => item.id === id);
       if (product) normalizeProduct(product);
-      return product ? sendJson(res, 200, { product }) : sendError(res, 404, "Product not found.");
+      return product ? sendJson(res, 200, { product: safePublicProduct(product) }) : sendError(res, 404, "Product not found.");
     }
 
     if (method === "POST" && pathname === "/api/auth/signup") {
       const body = await parseJson(req);
       const errors = [];
       if (!clean(body.fullName)) errors.push("Full name is required.");
+      if (!isPhone(body.phone)) errors.push("Valid phone number is required.");
+      if (!clean(body.city)) errors.push("City or state is required.");
+      if (!/^[0-9A-Za-z\-\s]{3,12}$/.test(clean(body.pincode))) errors.push("Valid pincode is required.");
       if (!isEmail(body.email)) errors.push("Valid email is required.");
       if (clean(body.password).length < 6) errors.push("Password must be at least 6 characters.");
       if (db.users.some(user => user.email === clean(body.email).toLowerCase())) errors.push("Email is already registered.");
       if (errors.length) return sendJson(res, 400, { errors });
       if (supabaseEnabled()) {
         try {
-          const session = await supabasePasswordAuth(clean(body.email).toLowerCase(), clean(body.password), "signup");
+          const session = await supabaseInstantSignup(body);
           return sendJson(res, 201, session);
         } catch (error) {
-          if (error.statusCode === 202) return sendJson(res, 202, { message: error.message });
+          if (error.statusCode === 400 || /already registered/i.test(error.message)) {
+            return sendError(res, 400, "Email is already registered.");
+          }
           console.warn("Supabase signup failed, using local fallback:", error.message);
         }
       }
@@ -1322,7 +1508,9 @@ async function handleApi(req, res, url) {
         total: orderItems.reduce((sum, item) => sum + item.price * item.qty, 0),
         payment: {
           method: clean(body.paymentMethod) || "cod",
-          status: clean(body.paymentMethod) === "razorpay" ? "Pending" : "COD"
+          status: clean(body.paymentStatus) || (clean(body.paymentMethod) === "razorpay" ? "Pending" : "COD"),
+          razorpayOrderId: clean(body.razorpay_order_id),
+          razorpayPaymentId: clean(body.razorpay_payment_id)
         },
         shipment: {
           provider: "",
@@ -1381,43 +1569,35 @@ async function handleApi(req, res, url) {
       return sendJson(res, 201, { message: "Thank you. Our team will contact you shortly.", application });
     }
 
-    if (method === "POST" && pathname === "/api/payments/razorpay/order") {
+    if (method === "POST" && (pathname === "/api/create-order" || pathname === "/api/payments/razorpay/order")) {
       const user = await requireAuth(req, res, db);
       if (!user) return;
       const body = await parseJson(req);
-      const amount = Number(body.amount);
-      if (!db.settings.payment.razorpayEnabled) return sendError(res, 400, "Razorpay is disabled.");
-      if (!Number.isFinite(amount) || amount <= 0) return sendError(res, 400, "Valid payment amount is required.");
-      const paymentOrder = {
-        id: uid("rzp_order"),
-        provider: "razorpay",
-        userId: user.id,
-        amount,
-        currency: db.settings.general.currency || "INR",
-        status: "created",
-        receipt: clean(body.receipt) || uid("receipt"),
-        createdAt: new Date().toISOString()
-      };
+      const paymentOrder = await createRazorpayOrder({
+        amount: Number(body.amount),
+        currency: clean(body.currency) || db.settings.general.currency || "INR",
+        receipt: clean(body.receipt) || uid("receipt")
+      });
       db.payments.unshift(paymentOrder);
       writeDb(db);
-      return sendJson(res, 201, { order: paymentOrder, keyId: db.settings.payment.razorpayKeyId, mode: db.settings.payment.paymentMode });
+      return sendJson(res, 201, razorpayOrderResponse(paymentOrder));
     }
 
-    if (method === "POST" && pathname === "/api/payments/razorpay/verify") {
+    if (method === "POST" && (pathname === "/api/verify-payment" || pathname === "/api/payments/razorpay/verify")) {
       const user = await requireAuth(req, res, db);
       if (!user) return;
       const body = await parseJson(req);
-      const payload = `${clean(body.razorpay_order_id)}|${clean(body.razorpay_payment_id)}`;
-      const ok = verifyHmacSignature(payload, clean(body.razorpay_signature), db.settings.payment.razorpayKeySecret);
+      const verified = verifyRazorpayPayment(body, DISABLE_RAZORPAY ? db.settings.payment.razorpayKeySecret : RAZORPAY_KEY_SECRET);
       db.integrationLogs.unshift({
         id: uid("log"),
         type: "razorpay",
-        status: ok ? "success" : "failure",
-        message: ok ? "Customer payment signature verified." : "Customer payment signature verification failed.",
+        status: "success",
+        message: "Customer payment signature verified.",
+        reference: verified.paymentId,
         createdAt: new Date().toISOString()
       });
       writeDb(db);
-      return ok ? sendJson(res, 200, { ok: true, message: db.settings.payment.successMessage }) : sendError(res, 400, db.settings.payment.failureMessage);
+      return sendJson(res, 200, { ok: true, message: db.settings.payment.successMessage, payment_id: verified.paymentId, order_id: verified.orderId });
     }
 
     if (pathname.startsWith("/api/admin")) {
@@ -1505,36 +1685,29 @@ async function handleApi(req, res, url) {
 
       if (method === "POST" && pathname === "/api/admin/payments/razorpay/order") {
         const body = await parseJson(req);
-        const amount = Number(body.amount);
-        if (!db.settings.payment.razorpayEnabled) return sendError(res, 400, "Razorpay is disabled.");
-        if (!Number.isFinite(amount) || amount <= 0) return sendError(res, 400, "Valid payment amount is required.");
-        const paymentOrder = {
-          id: uid("rzp_order"),
-          provider: "razorpay",
-          amount,
-          currency: db.settings.general.currency || "INR",
-          status: "created",
-          receipt: clean(body.receipt) || uid("receipt"),
-          createdAt: new Date().toISOString()
-        };
+        const paymentOrder = await createRazorpayOrder({
+          amount: Number(body.amount),
+          currency: clean(body.currency) || db.settings.general.currency || "INR",
+          receipt: clean(body.receipt) || uid("receipt")
+        });
         db.payments.unshift(paymentOrder);
         writeDb(db);
-        return sendJson(res, 201, { order: paymentOrder, keyId: db.settings.payment.razorpayKeyId, mode: db.settings.payment.paymentMode });
+        return sendJson(res, 201, razorpayOrderResponse(paymentOrder));
       }
 
       if (method === "POST" && pathname === "/api/admin/payments/razorpay/verify") {
         const body = await parseJson(req);
-        const payload = `${clean(body.razorpay_order_id)}|${clean(body.razorpay_payment_id)}`;
-        const ok = verifyHmacSignature(payload, clean(body.razorpay_signature), db.settings.payment.razorpayKeySecret);
+        const verified = verifyRazorpayPayment(body, DISABLE_RAZORPAY ? db.settings.payment.razorpayKeySecret : RAZORPAY_KEY_SECRET);
         db.integrationLogs.unshift({
           id: uid("log"),
           type: "razorpay",
-          status: ok ? "success" : "failure",
-          message: ok ? "Payment signature verified." : "Payment signature verification failed.",
+          status: "success",
+          message: "Payment signature verified.",
+          reference: verified.paymentId,
           createdAt: new Date().toISOString()
         });
         writeDb(db);
-        return ok ? sendJson(res, 200, { ok: true }) : sendError(res, 400, "Invalid payment signature.");
+        return sendJson(res, 200, { ok: true, payment_id: verified.paymentId, order_id: verified.orderId });
       }
 
       if (method === "POST" && pathname === "/api/admin/shiprocket/sync") {

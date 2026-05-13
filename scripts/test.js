@@ -1,6 +1,7 @@
 const assert = require("assert");
 const fs = require("fs");
 process.env.DISABLE_SUPABASE = "1";
+process.env.DISABLE_RAZORPAY = "1";
 const { server } = require("../server");
 const { DB_FILE } = require("../server");
 
@@ -55,7 +56,14 @@ async function run() {
   const email = `test${Date.now()}@example.com`;
   const signup = await request("/api/auth/signup", {
     method: "POST",
-    body: JSON.stringify({ fullName: "Test Customer", email, password: "secret123" })
+    body: JSON.stringify({
+      fullName: "Test Customer",
+      email,
+      password: "secret123",
+      phone: "9876543210",
+      city: "Delhi",
+      pincode: "110001"
+    })
   });
   assert.equal(signup.user.role, "customer");
 
